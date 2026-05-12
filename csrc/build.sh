@@ -30,6 +30,7 @@ COV="false"
 CLANG="false"
 VERBOSE="false"
 OOM="false"
+BUILD_TARGET=""
 THREAD_NUM=$(grep -c ^processor /proc/cpuinfo)
 MAX_JOBS=${MAX_JOBS:-}
 ENABLE_VALGRIND=FALSE
@@ -883,7 +884,7 @@ while [[ $# -gt 0 ]]; do
     --jit)
         ENABLE_BUILT_JIT=TRUE
         shift
-        BUILD="jit"
+        BUILD_TARGET="jit"
         ;;
     -n|--op-name)
         ascend_op_name="$2"
@@ -913,7 +914,7 @@ while [[ $# -gt 0 ]]; do
         shift 2
         ;;
     -b|--build)
-        BUILD="$2"
+        BUILD_TARGET="$2"
         shift 2
         ;;
     -u|--test)
@@ -1256,7 +1257,7 @@ if [ -n "${TEST}" ];then
         CUSTOM_OPTION="${CUSTOM_OPTION} -DENABLE_UBSAN=true"
     fi
 
-    BUILD=ops_test_utest
+    BUILD_TARGET=ops_test_utest
 fi
 
 if [ "${COV}" == "true" ];then
@@ -1274,7 +1275,7 @@ fi
 if [ -n "${EXAMPLE}" ];then
     CUSTOM_OPTION="${CUSTOM_OPTION} -DTESTS_EXAMPLE_OPS_TEST=${EXAMPLE}"
 
-    BUILD=ops_test_example
+    BUILD_TARGET=ops_test_example
 fi
 
 if [ -n "${TILING_KEY}" ];then
@@ -1536,7 +1537,7 @@ fi
 
 if [[ "$ENABLE_TEST" == "TRUE" ]]; then
     set_compute_unit_option
-    build_ut ${BUILD}
+    build_ut ${BUILD_TARGET}
 elif [[ "$ENABLE_CREATE_LIB" == "TRUE" ]]; then
     build_lib
 elif [[ "$ENABLE_STATIC" == "TRUE" ]]; then
@@ -1585,24 +1586,24 @@ elif [[ "$ENABLE_BUILD_PKG" == "TRUE" ]]; then      # --pkg 新命令新使用
     done
 else
     CUSTOM_OPTION="${CUSTOM_OPTION} -DENABLE_BUILD_PKG=ON"
-    if [ "${BUILD}" == "host" ];then
+    if [ "${BUILD_TARGET}" == "host" ];then
         cmake_config -DENABLE_OPS_KERNEL=OFF -DENABLE_OPS_HOST=ON
         build_host
         # TO DO
         rm -rf ${CURRENT_DIR}/output
         mkdir -p ${CURRENT_DIR}/output
         cp ${BUILD_DIR}/*.run ${CURRENT_DIR}/output
-    elif [ "${BUILD}" == "kernel" ];then
+    elif [ "${BUILD_TARGET}" == "kernel" ];then
         CUSTOM_OPTION="${CUSTOM_OPTION} -DENABLE_OPS_HOST=OFF -DENABLE_OPS_KERNEL=ON -DBUILD_OPS_RTY_KERNEL=ON"
         cmake_config 
         build_kernel
-    elif [ "${BUILD}" == "package" ];then
+    elif [ "${BUILD_TARGET}" == "package" ];then
         CUSTOM_OPTION="${CUSTOM_OPTION}  -DENABLE_BUILT_IN=ON -DENABLE_OPS_HOST=ON -DENABLE_OPS_KERNEL=ON"
         build_package
-    elif [ -n "${BUILD}" ];then
+    elif [ -n "${BUILD_TARGET}" ];then
         CUSTOM_OPTION="${CUSTOM_OPTION}  -DENABLE_OPS_HOST=ON -DENABLE_OPS_KERNEL=ON"
         cmake_config
-        build ${BUILD}
+        build ${BUILD_TARGET}
     fi
 fi
 } | awk '{print strftime("[%Y-%m-%d %H:%M:%S]"), $0}'
