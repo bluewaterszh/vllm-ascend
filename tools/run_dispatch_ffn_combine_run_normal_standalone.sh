@@ -16,6 +16,8 @@
 # This file is a part of the vllm-ascend project.
 #
 # Minimal standalone runner for dispatch_ffn_combine on the current fork.
+# Environment-specific settings are expected from the current shell, with an
+# optional env file supported via RUN_DISPATCH_FFN_ENV_FILE.
 # It installs the latest custom-op package into the repo-local custom-op folder
 # and only runs the `run_normal()` path in fresh worker processes.
 
@@ -23,8 +25,30 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+export SCRIPT_DIR
+export REPO_ROOT
 
-PYTHON_BIN="${PYTHON_BIN:-/home/ntlab/miniconda3/envs/pto-zy/bin/python}"
+ENV_FILE="${RUN_DISPATCH_FFN_ENV_FILE:-}"
+if [[ -n "${ENV_FILE}" ]]; then
+    if [[ ! -f "${ENV_FILE}" ]]; then
+        echo "[ERROR] env file not found: ${ENV_FILE}" >&2
+        exit 2
+    fi
+
+    # shellcheck disable=SC1090
+    set +e
+    set +u
+    set +o pipefail
+    source "${ENV_FILE}"
+    env_status=$?
+    set -euo pipefail
+    if [[ "${env_status}" -ne 0 ]]; then
+        echo "[ERROR] failed to source env file: ${ENV_FILE}" >&2
+        exit "${env_status}"
+    fi
+fi
+
+PYTHON_BIN="${PYTHON_BIN:-python3}"
 ASCEND_HOME_PATH="${ASCEND_HOME_PATH:-/usr/local/Ascend/cann-8.5.0}"
 PACKAGE_PATH="${PACKAGE_PATH:-${REPO_ROOT}/csrc/build/cann-ops-transformer-custom_linux-aarch64.run}"
 INSTALL_DIR="${INSTALL_DIR:-${REPO_ROOT}/vllm_ascend/_cann_ops_custom}"
@@ -36,7 +60,7 @@ INSTALL_PACKAGE="${INSTALL_PACKAGE:-1}"
 VERBOSE_LOGS="${VERBOSE_LOGS:-1}"
 BASE_SEED="${BASE_SEED:-20260512}"
 
-if [[ ! -x "${PYTHON_BIN}" ]]; then
+if ! command -v "${PYTHON_BIN}" >/dev/null 2>&1; then
     echo "[ERROR] python not found or not executable: ${PYTHON_BIN}" >&2
     exit 2
 fi
@@ -53,6 +77,13 @@ fi
 
 if [[ "${INSTALL_PACKAGE}" == "1" && ! -f "${PACKAGE_PATH}" ]]; then
     echo "[ERROR] package file not found: ${PACKAGE_PATH}" >&2
+    echo "[ERROR] Build the .run package first, or set INSTALL_PACKAGE=0 to reuse an existing INSTALL_DIR" >&2
+    exit 2
+fi
+
+if [[ "${INSTALL_PACKAGE}" != "1" && ! -d "${INSTALL_DIR}" ]]; then
+    echo "[ERROR] install dir not found while INSTALL_PACKAGE=0: ${INSTALL_DIR}" >&2
+    echo "[ERROR] Either build and point PACKAGE_PATH to the .run installer, or set INSTALL_DIR to an existing installed custom-op directory" >&2
     exit 2
 fi
 
@@ -71,9 +102,6 @@ if [[ "${source_status}" -ne 0 ]]; then
     echo "[ERROR] failed to source ${ASCEND_HOME_PATH}/set_env.sh" >&2
     exit "${source_status}"
 fi
-
-export PATH="/home/ntlab/miniconda3/envs/pto-zy/bin:/home/ntlab/miniconda3/bin:${PATH}"
-export LD_LIBRARY_PATH="/home/ntlab/miniconda3/envs/pto-zy/lib:/home/ntlab/miniconda3/lib:${ASCEND_HOME_PATH}/lib64:${LD_LIBRARY_PATH:-}"
 
 if [[ "${INSTALL_PACKAGE}" == "1" ]]; then
     mkdir -p "${INSTALL_DIR}"
