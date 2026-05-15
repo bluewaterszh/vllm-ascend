@@ -9,6 +9,11 @@ N=128
 TOPK=2
 EXPERTS=2
 MAX_OUTPUT_SIZE=32
+SEED=20260515
+ATOL=1e-3
+RTOL=1e-3
+WARMUP_ITERS=3
+MEASURE_ITERS=5
 
 ASCEND_HOME_PATH=${ASCEND_HOME_PATH:-/usr/local/Ascend/cann-8.5.0}
 MPI_ENV_BIN=${MPI_ENV_BIN:-/home/ntlab/miniconda3/envs/ltr_pto/bin}
@@ -49,11 +54,16 @@ python3 "${SCRIPT_DIR}/scripts/gen_data.py" \
   --world-size "${WORLD_SIZE}" \
   --m "${M}" --k "${K}" --n "${N}" \
   --topk "${TOPK}" --experts "${EXPERTS}" \
-  --max-output-size "${MAX_OUTPUT_SIZE}"
+  --max-output-size "${MAX_OUTPUT_SIZE}" \
+  --seed "${SEED}" \
+  --atol "${ATOL}" \
+  --rtol "${RTOL}"
 
 cmake -S "${SCRIPT_DIR}" -B "${BUILD_DIR}" -DSOC_VERSION="${SOC}"
 cmake --build "${BUILD_DIR}" --target dispatch_ffn_combine_v2 -j16
 
 export LD_LIBRARY_PATH="${BUILD_DIR}/lib:${LD_LIBRARY_PATH}"
 export DISPATCH_FFN_COMBINE_V2_CASE_DIR="${OUT_DIR}"
+export DISPATCH_FFN_COMBINE_V2_WARMUP_ITERS="${WARMUP_ITERS}"
+export DISPATCH_FFN_COMBINE_V2_MEASURE_ITERS="${MEASURE_ITERS}"
 "${MPI_RUNNER}" -n "${WORLD_SIZE}" "${BUILD_DIR}/dispatch_ffn_combine_v2"

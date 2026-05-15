@@ -15,6 +15,7 @@ using MpiInitFunc = int (*)(int *, char ***);
 using MpiCommSizeFunc = int (*)(MPI_Comm, int *);
 using MpiCommRankFunc = int (*)(MPI_Comm, int *);
 using MpiBcastFunc = int (*)(void *, int, MPI_Datatype, int, MPI_Comm);
+using MpiGatherFunc = int (*)(const void *, int, MPI_Datatype, void *, int, MPI_Datatype, int, MPI_Comm);
 using MpiBarrierFunc = int (*)(MPI_Comm);
 using MpiFinalizeFunc = int (*)();
 
@@ -116,6 +117,15 @@ inline void CommMpiBcast(void *buf, int count, MPI_Datatype dt, int root)
     auto fn = comm_mpi::GetFunc<MpiBcastFunc>("MPI_Bcast");
     if (fn != nullptr) {
         fn(buf, count, dt, root, COMM_MPI_COMM_WORLD);
+    }
+}
+
+inline void CommMpiGather(const void *sendbuf, int sendcount, MPI_Datatype sendtype,
+                          void *recvbuf, int recvcount, MPI_Datatype recvtype, int root)
+{
+    auto fn = comm_mpi::GetFunc<MpiGatherFunc>("MPI_Gather");
+    if (fn != nullptr) {
+        fn(sendbuf, sendcount, sendtype, recvbuf, recvcount, recvtype, root, COMM_MPI_COMM_WORLD);
     }
 }
 
