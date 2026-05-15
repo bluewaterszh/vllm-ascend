@@ -13,6 +13,8 @@
 
 #include "kernel_operator.h"
 
+#include <pto/common/pto_tile.hpp>
+
 #include "catlass/catlass.hpp"
 #include "catlass/arch/cross_core_sync.hpp"
 #include "catlass/arch/resource.hpp"
@@ -310,45 +312,62 @@ private:
     CATLASS_DEVICE void CopyGMToGMPerToken(
         AscendC::GlobalTensor<T> dst,
         AscendC::GlobalTensor<float> dstScale,
-        AscendC::GlobalTensor<T> src,
+        __gm__ T* src,
         int32_t rows,
         int32_t hiddenSize,
         int32_t ubMoveNum,
         int32_t& pingpongId
     ) {
+        static_assert(sizeof(T) == 1, "CopyGMToGMPerToken expects byte-packed per-token rows");
+        using ShapeDyn = pto::Shape<pto::DYNAMIC, pto::DYNAMIC, pto::DYNAMIC, pto::DYNAMIC, pto::DYNAMIC>;
+        using StrideDyn = pto::Stride<pto::DYNAMIC, pto::DYNAMIC, pto::DYNAMIC, pto::DYNAMIC, pto::DYNAMIC>;
+        using PackedGlobal = pto::GlobalTensor<T, ShapeDyn, StrideDyn, pto::Layout::ND>;
+        using PackedTile = pto::Tile<pto::TileType::Vec, T, 1, 1024, pto::BLayout::RowMajor, -1, -1>;
 
         constexpr int32_t BufferNum = 2;
         AscendC::LocalTensor<T> tmpBuffer1 = resource.ubBuf.template GetBufferByByte<T>(0);
-        constexpr int tmpBufferOffset = 96 * 1024; // half of UB
+        constexpr int tmpBufferOffset = 96 * 1024;
         AscendC::LocalTensor<T> tmpBuffer2 = resource.ubBuf.template GetBufferByByte<T>(tmpBufferOffset);
+        constexpr int32_t packedTileCols = 1024;
         uint32_t copyInNum = hiddenSize + UB_ALIGN;
         auto processCount = CeilDiv(rows, ubMoveNum);
+        __gm__ T* localPackedScratch = reinterpret_cast<__gm__ T*>(shmem() + peermemInfo.offsetPeerPerTokenScale);
+        AscendC::GlobalTensor<T> localPackedScratchGm;
+        localPackedScratchGm.SetGlobalBuffer(localPackedScratch);
+
         for (uint32_t processIndex = 0; processIndex < processCount; ++processIndex) {
             pingpongId = (pingpongId + 1) % BufferNum;
             AscendC::TEventID EVENT_ID = pingpongId == 0 ? EVENT_ID0 : EVENT_ID1;
             AscendC::LocalTensor<T> buf = pingpongId == 0 ? tmpBuffer1 : tmpBuffer2;
             AscendC::LocalTensor<float> bufScale = buf[hiddenSize].template ReinterpretCast<float>();
             auto inputOffset = processIndex * ubMoveNum * copyInNum;
-            
+
             int32_t rowNum = ubMoveNum;
             if (processIndex == processCount - 1) {
                 rowNum = rows - processIndex * ubMoveNum;
             }
 
+            ShapeDyn packedShape(1, 1, 1, rowNum, copyInNum);
+            StrideDyn packedStride(rowNum * copyInNum, rowNum * copyInNum, rowNum * copyInNum, copyInNum, 1);
+            PackedGlobal localPackedG(localPackedScratch, packedShape, packedStride);
+            PackedGlobal remotePackedG(src + inputOffset, packedShape, packedStride);
+            PackedTile packedTile(1, copyInNum < packedTileCols ? copyInNum : packedTileCols);
+            pto::comm::TGET(localPackedG, remotePackedG, packedTile);
+            AscendC::PipeBarrier<PIPE_ALL>();
+
             AscendC::WaitFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID);
             int64_t dataLen = rowNum * copyInNum;
-            AscendC::DataCopy(buf, src[inputOffset], dataLen);
+            AscendC::DataCopy(buf, localPackedScratchGm[0], dataLen);
 
             AscendC::SetFlag<AscendC::HardEvent::MTE2_MTE3>(EVENT_ID);
             AscendC::WaitFlag<AscendC::HardEvent::MTE2_MTE3>(EVENT_ID);
             auto outputOffset = processIndex * ubMoveNum * hiddenSize;
             #define U16(x) static_cast<uint16_t>(x)
-            AscendC::DataCopyPad(dst[outputOffset], 
+            AscendC::DataCopyPad(dst[outputOffset],
                 buf, {U16(rowNum), U16(hiddenSize), 1, 0, 0});
-            AscendC::DataCopyPad(dstScale[processIndex * ubMoveNum], 
+            AscendC::DataCopyPad(dstScale[processIndex * ubMoveNum],
                 bufScale, {U16(rowNum), U16(sizeof(float)), static_cast<uint32_t>(hiddenSize / 32), 0, 0});
             AscendC::SetFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID);
-            
         }
     }
     
@@ -672,13 +691,24 @@ private:
             using TType = Gemm::GemmType<int32_t, layout::RowMajor>;
             using CopyGmToUb = Epilogue::Tile::CopyGm2Ub<ArchTag, TType>;
             using CopyUbToGm = Epilogue::Tile::CopyUb2Gm<ArchTag, TType>;
+            using ShapeDyn = pto::Shape<pto::DYNAMIC, pto::DYNAMIC, pto::DYNAMIC, pto::DYNAMIC, pto::DYNAMIC>;
+            using StrideDyn = pto::Stride<pto::DYNAMIC, pto::DYNAMIC, pto::DYNAMIC, pto::DYNAMIC, pto::DYNAMIC>;
+            using TputGlobal = pto::GlobalTensor<int32_t, ShapeDyn, StrideDyn, pto::Layout::ND>;
+            using TputTile = pto::Tile<pto::TileType::Vec, int32_t, 1, 128, pto::BLayout::RowMajor, -1, -1>;
             CopyGmToUb copyGmToUb;
             CopyUbToGm copyUbToGm;
-            
+            int64_t scratchOffsetBytes = peermemInfo.offsetPeerPerTokenScale + static_cast<int64_t>(coreIdx) * numPerCore * sizeof(int32_t);
+            __gm__ int32_t* localScratch = reinterpret_cast<__gm__ int32_t*>(shmem(scratchOffsetBytes, params.rank));
+            AscendC::GlobalTensor<int32_t> localScratchGm;
+            localScratchGm.SetGlobalBuffer(localScratch);
+            ShapeDyn tputShape(1, 1, 1, 1, numPerCore);
+            StrideDyn tputStride(numPerCore, numPerCore, numPerCore, numPerCore, 1);
+            TputTile tputTile(1, numPerCore);
+
             AscendC::WaitFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID0);
-            
-            copyGmToUb(tmpBuffer, srcAddress[0], 
-                layout::RowMajor{ 1, numPerCore}, 
+
+            copyGmToUb(tmpBuffer, srcAddress[0],
+                layout::RowMajor{ 1, numPerCore},
                 layout::RowMajor{1, numPerCore});
 
             AscendC::SetFlag<AscendC::HardEvent::MTE2_V>(EVENT_ID0);
@@ -686,9 +716,12 @@ private:
             AscendC::Adds(tmpBuffer, tmpBuffer, 0x800000, numPerCore);
             AscendC::SetFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID0);
             AscendC::WaitFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID0);
-            copyUbToGm(dstAddress[0], tmpBuffer,
+            copyUbToGm(localScratchGm[0], tmpBuffer,
                 layout::RowMajor{ 1, numPerCore},
                 layout::RowMajor{1, numPerCore});
+            TputGlobal localPackedG(localScratch, tputShape, tputStride);
+            TputGlobal remotePackedG(reinterpret_cast<__gm__ int32_t*>(dstPeermemPtr), tputShape, tputStride);
+            pto::comm::TPUT(remotePackedG, localPackedG, tputTile);
             AscendC::SetFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID0);
             AscendC::WaitFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID0);
             shmem.NotifyRemoteTokenReady(dstEpIdx);
@@ -850,13 +883,12 @@ private:
                     uint32_t rowSrc = prevSum;
                     prevSum += rows;
                     GM_ADDR otherRankPtr = shmem(0, dstEpIdx);
-                    AscendC::GlobalTensor<ElementA> gmRemoteA;
-                    gmRemoteA.SetGlobalBuffer(reinterpret_cast<__gm__ ElementA*>(otherRankPtr + peermemInfo.offsetA));
+                    __gm__ ElementA* remotePackedRows = reinterpret_cast<__gm__ ElementA*>(otherRankPtr + peermemInfo.offsetA);
                     MatrixCoord offsetA{rowStart, 0};
                     int64_t gmOffsetA = params.layoutA.GetOffset(offsetA);
                     int64_t gmOffsetPeer = rowSrc * (params.problemShape.k() + UB_ALIGN);
                     int32_t ubMoveNum = 2;
-                    CopyGMToGMPerToken(gmA[gmOffsetA], gmPerTokenScale1[rowStart], gmRemoteA[gmOffsetPeer],  rows, params.problemShape.k(), ubMoveNum, pingpongIdx);
+                    CopyGMToGMPerToken(gmA[gmOffsetA], gmPerTokenScale1[rowStart], remotePackedRows + gmOffsetPeer, rows, params.problemShape.k(), ubMoveNum, pingpongIdx);
                 }
 
             }
@@ -894,7 +926,10 @@ private:
             static_cast<int32_t>(params.EP),
             static_cast<int32_t>(params.expertPerRank),
             reinterpret_cast<__gm__ int32_t *>(shmem() + peermemInfo.offsetPeerTokenPerExpert),
-            static_cast<int32_t>(n2)
+            static_cast<int32_t>(n2),
+            static_cast<int32_t>(params.rank),
+            shmem,
+            static_cast<int32_t>(peermemInfo.offsetPeerPerTokenScale)
         };
 
         typename BlockEpilogue3::Params epilogueParams3{
@@ -907,6 +942,7 @@ private:
             static_cast<int32_t>(L1TileShape::N),
             shmem,
             static_cast<int32_t>(peermemInfo.offsetD),
+            static_cast<int32_t>(peermemInfo.offsetPeerPerTokenScale),
             tokenPerExpertLayout
         };
         
@@ -988,8 +1024,6 @@ private:
 
             for(int32_t dstEpIdx = coreIdx; dstEpIdx < params.EP; dstEpIdx += coreNum) {
                 __gm__ void* dstPeermemPtr = shmem(peermemInfo.offsetD, dstEpIdx);
-                AscendC::GlobalTensor<ElementD2> gmRemotePeer;
-                gmRemotePeer.SetGlobalBuffer(reinterpret_cast<__gm__ ElementD2*>(dstPeermemPtr));
                 uint32_t srcRowOffset = (dstEpIdx == 0 ? 0 : cumsumMM((dstEpIdx - 1) * params.expertPerRank + groupIdx)) + prevGroupSum2;
                 if (srcRowOffset < params.maxOutputSize) {
                     uint32_t dataRows = tokenPerExpert(tokenPerExpertLayout(dstEpIdx, params.rank, groupIdx));
@@ -1005,10 +1039,11 @@ private:
                     MatrixCoord shapeC{dataRows, n2};
                     int64_t gmOffsetC = params.layoutD2.GetOffset(offsetC);
                     int64_t gmOffsetPeer = params.layoutD2.GetOffset(offsetPeer);
+                    __gm__ ElementD2* dstPeerBase = reinterpret_cast<__gm__ ElementD2*>(dstPeermemPtr) + gmOffsetPeer;
                     if constexpr (std::is_same_v<ElementA, int8_t>) {
-                        blockEpilogue(gmC2[gmOffsetC], shapeC, gmPerTokenScale2[srcRowOffset], gmRemotePeer[gmOffsetPeer]);
+                        blockEpilogue(gmC2[gmOffsetC], shapeC, gmPerTokenScale2[srcRowOffset], dstPeerBase, dstEpIdx);
                     } else {
-                        blockEpilogue(gmC2[gmOffsetC], shapeC, gmRemotePeer[gmOffsetPeer]);
+                        blockEpilogue(gmC2[gmOffsetC], shapeC, dstPeerBase, dstEpIdx);
                     }
                 }
             }

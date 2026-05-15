@@ -20,6 +20,10 @@
 #include "catlass/detail/callback.hpp"
 #include "catlass/epilogue/block/block_epilogue.hpp"
 
+#include <pto/common/pto_tile.hpp>
+
+#include "hccl_shmem.hpp"
+
 namespace Catlass::Epilogue::Block {
 
 // float scale, dequant per expert
@@ -71,12 +75,16 @@ public:
         int32_t EP;
         int32_t expertPerRank;
         int32_t n2;
+        int32_t rank;
+        HcclShmem shmem;
+        int32_t scratchOffset;
 
         CATLASS_DEVICE
         Params() {};
 
         CATLASS_DEVICE
-        Params(int32_t EP_, int32_t expertPerRank_, __gm__ int32_t *ptrTokenPerExpert_, int32_t n2_) : ptrTokenPerExpert(ptrTokenPerExpert_), EP(EP_), expertPerRank(expertPerRank_), n2(n2_) {}
+        Params(int32_t EP_, int32_t expertPerRank_, __gm__ int32_t *ptrTokenPerExpert_, int32_t n2_, int32_t rank_, HcclShmem &shmem_, int32_t scratchOffset_) :
+            ptrTokenPerExpert(ptrTokenPerExpert_), EP(EP_), expertPerRank(expertPerRank_), n2(n2_), rank(rank_), shmem(shmem_), scratchOffset(scratchOffset_) {}
     };
 
     CATLASS_DEVICE
@@ -138,13 +146,24 @@ public:
         AscendC::GlobalTensor<ElementC> const &gmC,
         MatrixCoord const &shapeC,
         AscendC::GlobalTensor<ElementPerTokenScale> const &gmPerTokenScale,
-        AscendC::GlobalTensor<ElementD> const &gmD
+        __gm__ ElementD* ptrD,
+        int32_t dstRank
     )
     {
+        using ShapeDyn = pto::Shape<pto::DYNAMIC, pto::DYNAMIC, pto::DYNAMIC, pto::DYNAMIC, pto::DYNAMIC>;
+        using StrideDyn = pto::Stride<pto::DYNAMIC, pto::DYNAMIC, pto::DYNAMIC, pto::DYNAMIC, pto::DYNAMIC>;
+        using TputGlobal = pto::GlobalTensor<ElementD, ShapeDyn, StrideDyn, pto::Layout::ND>;
+        using TputTile = pto::Tile<pto::TileType::Vec, ElementD, 1, 1024, pto::BLayout::RowMajor, -1, -1>;
+
         uint32_t blockM = shapeC.row();
         uint32_t blockN = shapeC.column();
-
         uint32_t tileLoops = blockM;
+        constexpr uint32_t scratchCols = 1024;
+        int32_t logicalSubCoreIdx = get_block_idx() + get_subblockid() * get_block_num();
+        int64_t scratchOffsetBytes = params.scratchOffset + static_cast<int64_t>(logicalSubCoreIdx) * scratchCols * sizeof(ElementD);
+        __gm__ ElementD* localScratch = reinterpret_cast<__gm__ ElementD*>(params.shmem(scratchOffsetBytes, params.rank));
+        AscendC::GlobalTensor<ElementD> gmLocalScratch;
+        gmLocalScratch.SetGlobalBuffer(localScratch);
 
         for (uint32_t loopIdx = 0; loopIdx < tileLoops; loopIdx ++) {
             auto gmTileC = gmC[loopIdx * blockN];
@@ -152,38 +171,49 @@ public:
             auto &ubCFp32 = ubCFp32List[ubListId];
             auto &ubMul = ubMulList[ubListId];
             auto &ubD = ubDList[ubListId];
-            auto gmTileD = gmD[loopIdx * blockN];
             LayoutC layoutUbC{1, blockN};
 
-            // Move C from GM workspace to UB
             AscendC::WaitFlag<AscendC::HardEvent::V_MTE2>(eventUbCVMTE2List[ubListId]);
             copyGmToUbC(ubC, gmTileC, layoutUbC, layoutUbC);
             AscendC::SetFlag<AscendC::HardEvent::MTE2_V>(eventUbCMTE2VList[ubListId]);
 
-            // Cast C to FP32 in UB
             AscendC::WaitFlag<AscendC::HardEvent::MTE2_V>(eventUbCMTE2VList[ubListId]);
             AscendC::Cast(ubCFp32, ubC, AscendC::RoundMode::CAST_NONE, blockN);
             AscendC::SetFlag<AscendC::HardEvent::V_MTE2>(eventUbCVMTE2List[ubListId]);
 
-            // Get per-token scale from row loopIdx of gmPerTokenScale
             ElementPerTokenScale perTokenScale = gmPerTokenScale(loopIdx);
 
             AscendC::SetFlag<AscendC::HardEvent::S_V>(0);
             AscendC::WaitFlag<AscendC::HardEvent::S_V>(0);
-            // Multiply FP32 C by the per-token scale
             AscendC::PipeBarrier<PIPE_V>();
             AscendC::Muls(ubCFp32, ubCFp32, perTokenScale, blockN);
             AscendC::PipeBarrier<PIPE_V>();
 
-            // Cast the muls result back to fp16/bf16
             LayoutD layoutUbD{1, blockN};
             AscendC::WaitFlag<AscendC::HardEvent::MTE3_V>(eventUbDMTE3VList[ubListId]);
-
             AscendC::Cast(ubD, ubCFp32, AscendC::RoundMode::CAST_RINT, blockN);
             AscendC::SetFlag<AscendC::HardEvent::V_MTE3>(eventUbDVMTE3List[ubListId]);
-            
+
             AscendC::WaitFlag<AscendC::HardEvent::V_MTE3>(eventUbDVMTE3List[ubListId]);
-            copyUbToGmD(gmTileD, ubD, layoutUbD, layoutUbD);
+            __gm__ ElementD* dstRowBase = ptrD + loopIdx * blockN;
+            if (dstRank == params.rank) {
+                AscendC::GlobalTensor<ElementD> gmTileD;
+                gmTileD.SetGlobalBuffer(dstRowBase);
+                copyUbToGmD(gmTileD[0], ubD, layoutUbD, layoutUbD);
+            } else {
+                for (uint32_t colOffset = 0; colOffset < blockN; colOffset += scratchCols) {
+                    uint32_t chunkCols = (blockN - colOffset < scratchCols) ? (blockN - colOffset) : scratchCols;
+                    LayoutD layoutScratch{1, chunkCols};
+                    copyUbToGmD(gmLocalScratch[0], ubD[colOffset], layoutScratch, layoutScratch);
+                    ShapeDyn rowShape(1, 1, 1, 1, chunkCols);
+                    StrideDyn rowStride(chunkCols, chunkCols, chunkCols, chunkCols, 1);
+                    TputTile tputTile(1, chunkCols < scratchCols ? chunkCols : scratchCols);
+                    TputGlobal localRowG(localScratch, rowShape, rowStride);
+                    TputGlobal remoteRowG(dstRowBase + colOffset, rowShape, rowStride);
+                    pto::comm::TPUT(remoteRowG, localRowG, tputTile);
+                    AscendC::PipeBarrier<PIPE_ALL>();
+                }
+            }
             AscendC::SetFlag<AscendC::HardEvent::MTE3_V>(eventUbDMTE3VList[ubListId]);
 
             ubListId = (ubListId + 1 < UB_STAGES) ? (ubListId + 1) : 0;

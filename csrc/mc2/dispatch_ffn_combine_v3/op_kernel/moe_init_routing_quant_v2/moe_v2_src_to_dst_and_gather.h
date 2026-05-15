@@ -200,9 +200,7 @@ __aicore__ inline void MoeV2SrcToDstAndGather<T, TilingData>::Compute(int32_t sr
   DataCopyPad(dynamicQuantScaleGm[dstIdx], quantScaleLocal, {1, 4, 0, 0, 0});
 
   outLocal = inputXOutQueue.DeQue<int8_t>();
-#ifndef __CCE_KT_TEST__
   DataCopyPad(expandedXGm[dstIdx * this->cols], outLocal, copyOutParams);
-#endif
   inputXInQueue.FreeTensor(inLocal);
   inputXOutQueue.FreeTensor(outLocal);
   scaleOutQueue.FreeTensor(quantScaleLocal);

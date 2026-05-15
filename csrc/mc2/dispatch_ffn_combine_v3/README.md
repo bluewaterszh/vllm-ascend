@@ -130,3 +130,44 @@ Averages across the two runs:
 - delta vs baseline: kernel `+24.2%`, e2e `+13.4%`
 
 Use this as the current performance reference before Stage 2 communication-primitive migration.
+
+## Current v2/v3 reference on the small case
+
+Reference command:
+
+```bash
+bash csrc/mc2/dispatch_ffn_combine_v2/run.sh \
+  --soc ascend910_93 \
+  --world-size 2 \
+  --m 16 \
+  --k 128 \
+  --n 128 \
+  --topk 2 \
+  --experts 2 \
+  --max-output-size 32
+
+bash csrc/mc2/dispatch_ffn_combine_v3/run.sh \
+  --soc ascend910_93 \
+  --world-size 2 \
+  --m 16 \
+  --k 128 \
+  --n 128 \
+  --topk 2 \
+  --experts 2 \
+  --max-output-size 32
+```
+
+Observed results:
+
+| version | kernel avg (us) | e2e avg (us) | input tokens/s | routed tokens/s | eq compute (TFLOPS) | eq comm (GB/s) | accuracy |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| v2 | 31.07 | 138.24 | 1029998.69 | 2059997.39 | 0.10 | 0.37 | PASS |
+| current v3 | 27.26 | 97.78 | 1174053.41 | 2348106.82 | 0.12 | 0.42 | PASS |
+
+Delta of current v3 vs v2:
+- kernel: `-12.3%`
+- e2e: `-29.3%`
+- input throughput: `+14.0%`
+- routed throughput: `+14.0%`
+
+This is the latest same-shape reference after the AICORE-only cleanup.

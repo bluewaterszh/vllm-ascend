@@ -106,9 +106,7 @@ __aicore__ inline void MoeV2SrcToDstOp::SyncAll() {
   if (coreNum == 1) {
     return;
   }
-#ifndef __CCE_KT_TEST__
   AscendC::SyncAll();
-#endif
 }
 
 template <typename TilingData>

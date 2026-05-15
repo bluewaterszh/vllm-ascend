@@ -9,6 +9,8 @@
 #include "catlass/layout/layout.hpp"
 #include "catlass/detail/callback.hpp"
 
+#include <pto/common/pto_tile.hpp>
+
 #include "hccl_shmem.hpp"
 #include "layout3d.hpp"
 
@@ -54,15 +56,16 @@ public:
         int32_t rank;
         HcclShmem shmem;
         int32_t offsetD;
+        int32_t scratchOffset;
         Layout3D tokenPerExpertLayout;
         CATLASS_DEVICE
         Params() {};
         CATLASS_DEVICE
-        Params(int32_t EP_, int32_t expertPerRank_, int32_t rank_, __gm__ int32_t *ptrTokenPerExpert_, 
-        LayoutC layoutC_, int32_t n2_, int32_t n0_, HcclShmem& shmem_, int32_t offsetD_, Layout3D tokenPerExpertLayout_) : 
-        ptrTokenPerExpert(ptrTokenPerExpert_), EP(EP_), 
+        Params(int32_t EP_, int32_t expertPerRank_, int32_t rank_, __gm__ int32_t *ptrTokenPerExpert_,
+        LayoutC layoutC_, int32_t n2_, int32_t n0_, HcclShmem& shmem_, int32_t offsetD_, int32_t scratchOffset_, Layout3D tokenPerExpertLayout_) :
+        ptrTokenPerExpert(ptrTokenPerExpert_), EP(EP_),
         expertPerRank(expertPerRank_),rank(rank_), layoutC(layoutC_), n2(n2_), n0(n0_),
-        shmem(shmem_), offsetD(offsetD_), tokenPerExpertLayout(tokenPerExpertLayout_)
+        shmem(shmem_), offsetD(offsetD_), scratchOffset(scratchOffset_), tokenPerExpertLayout(tokenPerExpertLayout_)
          {}
     };
 
@@ -222,7 +225,35 @@ public:
             auto gmTileD = gmRemotePeer[gmDstOffset];
             LayoutC layoutGM2{lenData, actualBlockShape.n(), params.n2};
             LayoutC layoutUB2{lenData, actualBlockShape.n(), n0};
-            copyUbToGmD(gmTileD, ubD[tileOffset *  n0], layoutGM2, layoutUB2);
+            if (dstEpIdx == params.rank) {
+                copyUbToGmD(gmTileD, ubD[tileOffset * n0], layoutGM2, layoutUB2);
+            } else {
+                using ShapeDyn = pto::Shape<pto::DYNAMIC, pto::DYNAMIC, pto::DYNAMIC, pto::DYNAMIC, pto::DYNAMIC>;
+                using StrideDyn = pto::Stride<pto::DYNAMIC, pto::DYNAMIC, pto::DYNAMIC, pto::DYNAMIC, pto::DYNAMIC>;
+                using TputGlobal = pto::GlobalTensor<ElementD, ShapeDyn, StrideDyn, pto::Layout::ND>;
+                using TputTile = pto::Tile<pto::TileType::Vec, ElementD, 1, 128, pto::BLayout::RowMajor, -1, -1>;
+
+                int32_t logicalSubCoreIdx = get_block_idx() + get_subblockid() * get_block_num();
+                int64_t scratchOffsetBytes = params.scratchOffset + static_cast<int64_t>(logicalSubCoreIdx) * n0 * sizeof(ElementD);
+                __gm__ ElementD* localScratch = reinterpret_cast<__gm__ ElementD*>(params.shmem(scratchOffsetBytes, params.rank));
+                AscendC::GlobalTensor<ElementD> gmLocalScratch;
+                gmLocalScratch.SetGlobalBuffer(localScratch);
+                LayoutC layoutScratchRow{1, actualBlockShape.n(), actualBlockShape.n()};
+                LayoutC layoutUbRow{1, actualBlockShape.n(), n0};
+                ShapeDyn rowShape(1, 1, 1, 1, actualBlockShape.n());
+                StrideDyn localStride(actualBlockShape.n(), actualBlockShape.n(), actualBlockShape.n(), actualBlockShape.n(), 1);
+                StrideDyn remoteStride(params.n2, params.n2, params.n2, params.n2, 1);
+                TputTile tputTile(1, actualBlockShape.n());
+                __gm__ ElementD* remotePeerBase = reinterpret_cast<__gm__ ElementD*>(dstPeermemPtr) + gmDstOffset;
+
+                for (uint32_t rowIdx = 0; rowIdx < lenData; ++rowIdx) {
+                    copyUbToGmD(gmLocalScratch[0], ubD[(tileOffset + rowIdx) * n0], layoutScratchRow, layoutUbRow);
+                    TputGlobal localRowG(localScratch, rowShape, localStride);
+                    TputGlobal remoteRowG(remotePeerBase + rowIdx * params.n2, rowShape, remoteStride);
+                    pto::comm::TPUT(remoteRowG, localRowG, tputTile);
+                    AscendC::PipeBarrier<PIPE_ALL>();
+                }
+            }
             tileOffset += lenData;
         }
         AscendC::SetFlag<AscendC::HardEvent::MTE3_V>(event_id);

@@ -231,9 +231,7 @@ __aicore__ inline void MoeV2SortMultiCore::VBSProcess() {
       OneCoreVMSProcess(sortCoreLoops, sortCoreLoopElements, sortCoreLastLoopElements);
     }
   }
-#ifndef __CCE_KT_TEST__
   AscendC::SyncAll();
-#endif
 }
 
 __aicore__ inline void MoeV2SortMultiCore::VMSProcess() {
@@ -268,9 +266,7 @@ __aicore__ inline void MoeV2SortMultiCore::VMSProcess() {
 
     lastListElements = perListElements * (remainListNum - 1) + lastListElements;
     perListElements = perListElements * MAX_MRGSORT_LIST;
-#ifndef __CCE_KT_TEST__
     AscendC::SyncAll();
-#endif
   }
 }
 
@@ -285,9 +281,7 @@ __aicore__ inline void MoeV2SortMultiCore::SortOutProcess() {
     sorter.Init(&mrgsortParam, pipe);
     sorter.Process();
   }
-#ifndef __CCE_KT_TEST__
   AscendC::SyncAll();
-#endif
 }
 
 template <typename TilingData>

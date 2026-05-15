@@ -150,12 +150,6 @@ __aicore__ inline void MoeV2ExpertTokenOut::CopyOutExpertTokensCumsum(bool isTai
   if (this->dropPadMode != DROPLESS_MODE || expertTokensCountOrCumsumFlag != EXERPT_TOKENS_CUMSUM) {
     return;
   }
-#ifdef __CCE_KT_TEST__
-    // CPU twin debugging cannot use multi-core sync, so index may contain uninitialized dirty data; handle specially
-    if (this->firstExpertId > expertTokensCountOrCumsumGm.GetSize()) {
-        return;
-    }
-#endif
   int64_t copyLength = isTail ? this->lastExpertId - this->firstExpertId + 1 : this->expertNumUbAlign;
   int64_t end = this->expertNum - this->firstExpertId;
   for (int64_t i = 0; i < copyLength; i++) {
@@ -177,9 +171,7 @@ __aicore__ inline void MoeV2ExpertTokenOut::CopyOutExpertTokensCumsum(bool isTai
   }
   DataCopyExtParams copyParams{static_cast<uint16_t>(1), static_cast<uint32_t>(copyLength * sizeof(int32_t)), 0, 0, 0};
   SetAtomicAdd<int32_t>();
-#ifndef __CCE_KT_TEST__
   DataCopyPad(expertTokensCountOrCumsumGm[this->firstExpertId], this->expertTokenIdxOutLocal, copyParams);
-#endif
   SetAtomicNone();
   if (isTail && end > this->expertNumUbAlign) {
     int64_t remainderLength = end - copyLength;
@@ -201,10 +193,6 @@ __aicore__ inline void MoeV2ExpertTokenOut::CopyOutExpertTokensCumsum(bool isTai
 __aicore__ inline void MoeV2ExpertTokenOut::CopyOutExpertTokensCount(bool isTail) {
   int64_t copyLength = isTail ? this->lastExpertId - this->firstExpertId + 1 : this->expertNumUbAlign;
   DataCopyExtParams copyParams{static_cast<uint16_t>(1), static_cast<uint32_t>(copyLength * sizeof(int32_t)), 0, 0, 0};
-#ifdef __CCE_KT_TEST__
-    // CPU twin debugging skips output copies
-    return;
-#endif
   SetAtomicAdd<int32_t>();
   if (this->dropPadMode == DROP_PAD_MODE && expertTokensBeforeCapacityFlag > EXERPT_TOKENS_NONE) {
     DataCopyPad(expertTokensBeforeCapacityGm[this->firstExpertId], this->expertTokenIdxOutLocal, copyParams);
@@ -236,9 +224,7 @@ __aicore__ inline void MoeV2ExpertTokenOut::SyncAll() {
   if (coreNum == 1) {
     return;
   }
-#ifndef __CCE_KT_TEST__
   AscendC::SyncAll();
-#endif
 }
 
 template <typename TilingData>

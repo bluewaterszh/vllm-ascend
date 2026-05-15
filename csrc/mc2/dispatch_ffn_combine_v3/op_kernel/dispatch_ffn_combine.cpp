@@ -13,14 +13,14 @@
  * \brief
  */
 #include "kernel_operator.h"
-#if !defined(__CCE_KT_TEST__) && defined(__CCE_AICORE__)
+#if defined(__CCE_AICORE__)
 #include "lib/matmul_intf.h"
 #include "dispatch_ffn_combine_tiling.h"
 #include "dispatch_ffn_combine.h"
 #endif
 #include "../kernel_launch.hpp"
 
-#if !defined(__CCE_KT_TEST__) && defined(__CCE_AICORE__)
+#if defined(__CCE_AICORE__)
 using namespace AscendC;
 using namespace DispatchFFNCombineImpl;
 extern "C" __global__ __aicore__ void dispatch_ffn_combine(GM_ADDR x, GM_ADDR w1, GM_ADDR w2,  GM_ADDR expertId, GM_ADDR scale1, GM_ADDR scale2, GM_ADDR probs,
@@ -40,7 +40,21 @@ extern "C" __global__ __aicore__ void dispatch_ffn_combine(GM_ADDR x, GM_ADDR w1
 
 void launchDispatchFFNCombine(const DispatchFFNCombineLaunchArgs &args, void *stream)
 {
-#if defined(__CCE_KT_TEST__) || !defined(__CCE_AICORE__)
+#if defined(__CCE_AICORE__)
+    dispatch_ffn_combine<<<args.block_dim, nullptr, stream>>>(
+        reinterpret_cast<GM_ADDR>(args.x),
+        reinterpret_cast<GM_ADDR>(args.weight1),
+        reinterpret_cast<GM_ADDR>(args.weight2),
+        reinterpret_cast<GM_ADDR>(args.expert_idx),
+        reinterpret_cast<GM_ADDR>(args.scale1),
+        reinterpret_cast<GM_ADDR>(args.scale2),
+        reinterpret_cast<GM_ADDR>(args.probs),
+        reinterpret_cast<GM_ADDR>(args.x_active_mask),
+        reinterpret_cast<GM_ADDR>(args.out),
+        reinterpret_cast<GM_ADDR>(args.expert_token_nums),
+        reinterpret_cast<GM_ADDR>(args.workspace),
+        reinterpret_cast<GM_ADDR>(args.tiling));
+#else
     dispatch_ffn_combine(
         args.block_dim,
         nullptr,
@@ -57,19 +71,5 @@ void launchDispatchFFNCombine(const DispatchFFNCombineLaunchArgs &args, void *st
         args.expert_token_nums,
         args.workspace,
         args.tiling);
-#else
-    dispatch_ffn_combine<<<args.block_dim, nullptr, stream>>>(
-        reinterpret_cast<GM_ADDR>(args.x),
-        reinterpret_cast<GM_ADDR>(args.weight1),
-        reinterpret_cast<GM_ADDR>(args.weight2),
-        reinterpret_cast<GM_ADDR>(args.expert_idx),
-        reinterpret_cast<GM_ADDR>(args.scale1),
-        reinterpret_cast<GM_ADDR>(args.scale2),
-        reinterpret_cast<GM_ADDR>(args.probs),
-        reinterpret_cast<GM_ADDR>(args.x_active_mask),
-        reinterpret_cast<GM_ADDR>(args.out),
-        reinterpret_cast<GM_ADDR>(args.expert_token_nums),
-        reinterpret_cast<GM_ADDR>(args.workspace),
-        reinterpret_cast<GM_ADDR>(args.tiling));
 #endif
 }

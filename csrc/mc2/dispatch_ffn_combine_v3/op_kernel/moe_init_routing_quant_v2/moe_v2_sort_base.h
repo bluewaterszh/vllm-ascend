@@ -61,9 +61,7 @@ __aicore__ inline void MoeV2SortBase::SyncAll() {
   if (coreNum == 1) {
     return;
   }
-#ifndef __CCE_KT_TEST__
   AscendC::SyncAll();
-#endif
 }
 
 }  // namespace MoeInitRoutingQuantV2

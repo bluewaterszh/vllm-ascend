@@ -131,12 +131,6 @@ __aicore__ inline void MoeV2SrcToDstWithCapacity<T, TilingData>::CopyOut(int64_t
           if (i == this->colLoops - 1) {
             col = this->lastLoopCols;
           }
-#ifdef __CCE_KT_TEST__
-          // CPU twin debugging cannot use multi-core sync, so index may contain uninitialized dirty data; handle specially
-          if (index * this->cols + i * this->perLoopCols + col * sizeof(T) > expandedXGm.GetSize()) {
-              continue;
-          }
-#endif
           DataCopyExtParams copyParams1{static_cast<uint16_t>(1), static_cast<uint32_t>(col * sizeof(T)), 0, 0, 0};
           DataCopyPad(expandedXGm[index * this->cols + i * this->perLoopCols], this->outTmpLocal, copyParams1);
           SetWaitFlag<HardEvent::MTE3_S>(HardEvent::MTE3_S);
@@ -192,9 +186,7 @@ __aicore__ inline void MoeV2SrcToDstWithCapacity<T, TilingData>::SyncAll() {
   if (coreNum == 1) {
     return;
   }
-#ifndef __CCE_KT_TEST__
   AscendC::SyncAll();
-#endif
 }
 
 template <typename T, typename TilingData>

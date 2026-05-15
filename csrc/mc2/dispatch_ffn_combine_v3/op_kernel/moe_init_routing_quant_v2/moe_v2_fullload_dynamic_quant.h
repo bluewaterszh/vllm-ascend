@@ -194,7 +194,6 @@ __aicore__ inline void MoeV2FullLoadDynamicQuant<T>::ComputeExpertTokenCountOrCu
       lastExpertId++;
     }
   }
-#ifndef __CCE_KT_TEST__
   expertTokensCount.SetValue(lastExpertId, tokenCount);
   if (this->expertTokensCountOrCumsumFlag == EXERPT_TOKENS_CUMSUM) {
     lastExpertId++;
@@ -209,7 +208,6 @@ __aicore__ inline void MoeV2FullLoadDynamicQuant<T>::ComputeExpertTokenCountOrCu
     DataCopyPad(expertTokensCountOrCumsumGm, expertTokensCount, copyParams);
   }
   expertTokensCopyOutQueue_.FreeTensor(expertTokensCount);
-#endif
 }
 
 template <typename T>
