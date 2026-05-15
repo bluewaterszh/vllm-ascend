@@ -83,8 +83,7 @@ private:
     int32_t rank;
     int32_t rankSize;
     int32_t aivNum;
-    GM_ADDR symmetricPtr_;
-    uint64_t segmentSize_;
+    GM_ADDR hcclContext_;
 
     int32_t m0;
     int32_t k0;
@@ -274,8 +273,7 @@ __aicore__ inline void DispatchFFNCombine<TemplateMMA2ACFunc>::Init(GM_ADDR xGM,
 
     rank = static_cast<int32_t>(tilingData->runtimeInfo.rank);
     rankSize = static_cast<int32_t>(tilingData->runtimeInfo.rankSize);
-    symmetricPtr_ = reinterpret_cast<GM_ADDR>(tilingData->runtimeInfo.symmetricPtr);
-    segmentSize_ = tilingData->runtimeInfo.segmentSize;
+    hcclContext_ = reinterpret_cast<GM_ADDR>(tilingData->runtimeInfo.hcclContext);
 }
 
 template <TemplateMMA2AClass>
@@ -380,7 +378,7 @@ __aicore__ inline void DispatchFFNCombine<TemplateMMA2ACFunc>::Process()
     }
     typename MatmulKernel::Params params{
         problemShape, static_cast<uint32_t>(EP), static_cast<uint32_t>(listLen), static_cast<uint32_t>(expertPerRank), static_cast<uint32_t>(maxOutputSize),
-        static_cast<uint32_t>(rank), static_cast<uint32_t>(rankSize), ubMoveNum, symmetricPtr_, segmentSize_,
+        static_cast<uint32_t>(rank), static_cast<uint32_t>(rankSize), ubMoveNum, hcclContext_,
         static_cast<uint32_t>(topK), initRoutingQuantTilingKey,
         epilogueCoreNum, epilogueGranularity,
         xGM_, layoutA1, layoutA2,

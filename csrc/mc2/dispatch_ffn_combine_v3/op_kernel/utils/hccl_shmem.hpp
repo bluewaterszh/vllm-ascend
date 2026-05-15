@@ -8,8 +8,18 @@
 #ifdef HCCL_COMM
 #include "moe_distribute_base.h"
 using namespace AscendC::HcclContextDef;
-
 #else
+struct StandaloneHcclDeviceContext {
+    static constexpr uint32_t HCCL_MAX_RANK_NUM = 64;
+
+    uint64_t workSpace;
+    uint64_t workSpaceSize;
+    uint32_t rankId;
+    uint32_t rankNum;
+    uint64_t winSize;
+    uint64_t windowsIn[HCCL_MAX_RANK_NUM];
+    uint64_t windowsOut[HCCL_MAX_RANK_NUM];
+};
 #endif
 
 #define FORCE_INLINE_AICORE inline __attribute__((always_inline)) __aicore__
@@ -101,56 +111,49 @@ public:
             m_segmentSize = SHMEM_MEM;
         }
         FORCE_INLINE_AICORE
-        void initShmem(GM_ADDR symmetricPtr_, size_t rank, size_t rankSize, size_t segmentSize) {
-            symmetricPtr = symmetricPtr_;
-            m_rank = static_cast<int32_t>(rank);
-            m_rankSize = static_cast<int32_t>(rankSize);
-            m_segmentSize = segmentSize;
+        void initShmem(GM_ADDR hcclContext) {
+            standaloneCtx_ = reinterpret_cast<__gm__ StandaloneHcclDeviceContext *>(hcclContext);
+            m_rank = static_cast<int32_t>(standaloneCtx_->rankId);
+            m_rankSize = static_cast<int32_t>(standaloneCtx_->rankNum);
+            m_segmentSize = static_cast<size_t>(standaloneCtx_->winSize);
         }
     #endif
 
     FORCE_INLINE_AICORE
-    GM_ADDR WindowBase(GM_ADDR base, int32_t rankId) const {
-        auto windows = reinterpret_cast<__gm__ uint64_t *>(base);
-        return reinterpret_cast<GM_ADDR>(windows[rankId]);
+    GM_ADDR LocalWindowBase() const {
+        #ifdef HCCL_COMM
+            return (GM_ADDR)(WinContext_->localWindowsIn);
+        #else
+            return reinterpret_cast<GM_ADDR>(standaloneCtx_->windowsIn[m_rank]);
+        #endif
+    }
+
+    FORCE_INLINE_AICORE
+    GM_ADDR RankWindowBase(int32_t rankId) const {
+        #ifdef HCCL_COMM
+            return (GM_ADDR)((rankId == m_rank) ? WinContext_->localWindowsIn :
+                                    ((HcclRankRelationResV2Custom *)(WinContext_->remoteRes[rankId].nextDevicePtr))->windowsIn);
+        #else
+            return reinterpret_cast<GM_ADDR>(standaloneCtx_->windowsIn[rankId]);
+        #endif
     }
 
     FORCE_INLINE_AICORE
     GM_ADDR operator() () const {   // No parameters: return pointer to local peermem
-        #ifdef HCCL_COMM
-            return (GM_ADDR)(WinContext_->localWindowsIn);
-        #else
-            return WindowBase(symmetricPtr, m_rank);
-        #endif
+        return LocalWindowBase();
     }
 
     FORCE_INLINE_AICORE
     GM_ADDR operator() (int32_t index) const {  // With index parameter: return pointer to the base address of remote peermem
-        #ifdef HCCL_COMM
-            return (GM_ADDR)((index == m_rank) ? WinContext_->localWindowsIn :
-                                    ((HcclRankRelationResV2Custom *)(WinContext_->remoteRes[index].nextDevicePtr))->windowsIn);
-        #else
-            return WindowBase(symmetricPtr, index);
-        #endif
+        return RankWindowBase(index);
     }
 
     FORCE_INLINE_AICORE
     GM_ADDR operator () (int64_t offset, int32_t rankId) const  {
-        #ifdef HCCL_COMM
-            if (offset < 0 || offset >= m_segmentSize) {
-                return nullptr;
-            }
-            if (rankId < 0 || rankId >= m_rankSize) {
-                return nullptr;
-            }
-            return (GM_ADDR)((rankId == m_rank) ? WinContext_->localWindowsIn :
-                                    ((HcclRankRelationResV2Custom *)(WinContext_->remoteRes[rankId].nextDevicePtr))->windowsIn) + offset;
-        #else
-            if (offset < 0 || offset >= static_cast<int64_t>(m_segmentSize) || rankId < 0 || rankId >= m_rankSize) {
-                return nullptr;
-            }
-            return WindowBase(symmetricPtr, rankId) + offset;
-        #endif
+        if (offset < 0 || offset >= static_cast<int64_t>(m_segmentSize) || rankId < 0 || rankId >= m_rankSize) {
+            return nullptr;
+        }
+        return RankWindowBase(rankId) + offset;
     }
 
 
@@ -226,17 +229,17 @@ public:
         //subblockid = 0
         uint32_t stateOffset_ =  STATE_OFFSET;
         // uint32_t epStateOffsetOnWin_ = m_rank * stateOffset_;
-        
+
         uint64_t flag_offset = (m_segmentSize - MB_SIZE) + m_rank * stateOffset_;
         //uint64_t flag_offset = (m_segmentSize - MB_SIZE);
         int vec_size = get_block_num();
         int vec_id = get_block_idx();
- 
+
         AscendC::CrossCoreSetFlag<0x0, PIPE_MTE3>(RECV_SYNC_EVENT_ID);
         AscendC::CrossCoreSetFlag<0x0, PIPE_MTE3>(SEND_SYNC_EVENT_ID);
         AscendC::CrossCoreWaitFlag(SEND_SYNC_EVENT_ID);
         AscendC::PipeBarrier<PIPE_ALL>();
- 
+
         ctrBuffer.SetValue(0, epStateValue_);
         AscendC::SetFlag<AscendC::HardEvent::S_MTE3>(EVENT_ID0);
         AscendC::WaitFlag<AscendC::HardEvent::S_MTE3>(EVENT_ID0);
@@ -278,9 +281,9 @@ public:
             uint32_t mask = 1;  // gatherMask + sum
             uint64_t rsvdCnt = 0;
             // DataCopyParams intriParams{static_cast<uint16_t>(sendRankNum_), 1,
-            //                         static_cast<uint16_t>((moeSendNum_ > 512) ? 7 : 15), 0}; 
+            //                         static_cast<uint16_t>((moeSendNum_ > 512) ? 7 : 15), 0};
             AscendC::DataCopyParams intriParams{static_cast<uint16_t>(sendRankNum_), 1,
-                                    static_cast<uint16_t>(15), 0}; 
+                                    static_cast<uint16_t>(15), 0};
 
             float sumOfFlag = static_cast<float>(-1.0);
             float minTarget = (sumTarget_ * sendRankNum_) - (float)0.5;
@@ -322,7 +325,9 @@ public:
     }
 
 private:
-    GM_ADDR symmetricPtr;
+    #ifndef HCCL_COMM
+        __gm__ StandaloneHcclDeviceContext *standaloneCtx_ = nullptr;
+    #endif
     int32_t m_rank;
     int32_t m_rankSize;
     size_t m_segmentSize;

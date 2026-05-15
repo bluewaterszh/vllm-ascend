@@ -122,8 +122,7 @@ public:
         uint32_t rank;
         uint32_t rankSize;
         int32_t ubMoveNum;
-        GM_ADDR symmetricPtr;
-        uint64_t segmentSize;
+        GM_ADDR hcclContext;
         //--------------
         GM_ADDR expertIdx;
         GM_ADDR moeInitRoutingQuantV2Scale;
@@ -150,7 +149,7 @@ public:
         Params(
             GemmCoord problemShape_,
             uint32_t EP_, uint32_t listLen_, uint32_t expertPerRank_, uint32_t maxOutputSize_,
-            uint32_t rank_, uint32_t rankSize_, int32_t ubMoveNum_, GM_ADDR symmetricPtr_, uint64_t segmentSize_, int64_t topK_,
+            uint32_t rank_, uint32_t rankSize_, int32_t ubMoveNum_, GM_ADDR hcclContext_, int64_t topK_,
             uint64_t initRoutingQuantTilingKey_, uint32_t epilogueCoreNum_, uint32_t epilogueGranularity_,
             GM_ADDR ptrA_, LayoutA layoutA_, LayoutA layoutA2_,
             GM_ADDR ptrB1_, LayoutB layoutB1_,
@@ -166,7 +165,7 @@ public:
             optiling::MoeInitRoutingQuantV2TilingData moeInitRoutingQuantV2TilingData_
         ) : problemShape(problemShape_),
             EP(EP_), listLen(listLen_), expertPerRank(expertPerRank_), maxOutputSize(maxOutputSize_),
-            rank(rank_), rankSize(rankSize_), ubMoveNum(ubMoveNum_), symmetricPtr(symmetricPtr_), segmentSize(segmentSize_), topK(topK_),
+            rank(rank_), rankSize(rankSize_), ubMoveNum(ubMoveNum_), hcclContext(hcclContext_), topK(topK_),
             initRoutingQuantTilingKey(initRoutingQuantTilingKey_),
             epilogueCoreNum(epilogueCoreNum_), epilogueGranularity(epilogueGranularity_),
             ptrA(reinterpret_cast<__gm__ ElementA *>(ptrA_)), layoutA(layoutA_), layoutA2(layoutA2_),
@@ -231,7 +230,7 @@ public:
 private:
     CATLASS_DEVICE void initBuffer(Params const &params) {
         #ifndef HCCL_COMM
-            shmem.initShmem(params.symmetricPtr, params.rank, params.rankSize, params.segmentSize);
+            shmem.initShmem(params.hcclContext);
         #endif
         workspaceInfo = WorkspaceInfo(params);
         peermemInfo = PeermemInfo(params, shmem);

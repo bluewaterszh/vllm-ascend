@@ -1,7 +1,6 @@
 #pragma once
 
 #include <cstdint>
-#include <vector>
 
 #include "acl/acl.h"
 #include "hccl/hccl_comm.h"
@@ -15,8 +14,8 @@ struct HcclDeviceContext {
     uint32_t rankId = 0;
     uint32_t rankNum = 0;
     uint64_t winSize = 0;
-    uint64_t windowsIn[HCCL_MAX_RANK_NUM] = {};
-    uint64_t windowsOut[HCCL_MAX_RANK_NUM] = {};
+    uint64_t windowsIn[HcclDeviceContext::HCCL_MAX_RANK_NUM] = {};
+    uint64_t windowsOut[HcclDeviceContext::HCCL_MAX_RANK_NUM] = {};
 };
 
 using rtError_t = int32_t;
@@ -42,8 +41,6 @@ struct StandaloneHcclContext {
 struct StandaloneRankRuntime {
     StandaloneHcclContext hccl;
     aclrtStream compute_stream = nullptr;
-    void *window_table_dev = nullptr;
-    std::vector<uint64_t> window_table_host;
 };
 
 bool InitStandaloneRankRuntime(StandaloneRankRuntime &runtime, int rank_id, int world_size, const HcclRootInfo &root_info);
