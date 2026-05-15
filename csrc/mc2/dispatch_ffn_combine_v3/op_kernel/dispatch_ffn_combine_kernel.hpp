@@ -14,6 +14,7 @@
 #include "kernel_operator.h"
 
 #include <pto/common/pto_tile.hpp>
+#include <pto/pto-inst.hpp>
 
 #include "catlass/catlass.hpp"
 #include "catlass/arch/cross_core_sync.hpp"
@@ -58,6 +59,58 @@
 using namespace AscendC;
 
 namespace Catlass::Gemm::Kernel {
+namespace kernel_detail {
+
+using PtoShapeDyn = pto::Shape<pto::DYNAMIC, pto::DYNAMIC, pto::DYNAMIC, pto::DYNAMIC, pto::DYNAMIC>;
+using PtoStrideDyn = pto::Stride<pto::DYNAMIC, pto::DYNAMIC, pto::DYNAMIC, pto::DYNAMIC, pto::DYNAMIC>;
+
+template <typename Element>
+using PtoGlobalNd = pto::GlobalTensor<Element, PtoShapeDyn, PtoStrideDyn, pto::Layout::ND>;
+
+template <typename Element>
+CATLASS_DEVICE PtoGlobalNd<Element> MakeContiguousGlobal(AscendC::GlobalTensor<Element> const &tensor, uint32_t elemNum)
+{
+    PtoShapeDyn shape(1, 1, 1, 1, elemNum);
+    PtoStrideDyn stride(elemNum, elemNum, elemNum, elemNum, 1);
+    auto *ptr = const_cast<__gm__ Element *>(tensor.GetPhyAddr());
+    return PtoGlobalNd<Element>(ptr, shape, stride);
+}
+
+template <typename Element, int TileElems = 1024>
+CATLASS_DEVICE void PtoLoadVector(AscendC::LocalTensor<Element> const &dst,
+                                  AscendC::GlobalTensor<Element> const &src,
+                                  uint32_t elemNum)
+{
+    using PtoTile = pto::Tile<pto::TileType::Vec, Element, 1, TileElems, pto::BLayout::RowMajor, -1, -1>;
+    for (uint32_t offset = 0; offset < elemNum; offset += TileElems) {
+        const uint32_t cur = (elemNum - offset > TileElems) ? TileElems : (elemNum - offset);
+        auto dstChunk = dst[offset];
+        auto srcChunk = src[offset];
+        auto srcGlobal = MakeContiguousGlobal(srcChunk, cur);
+        PtoTile tile(1, cur);
+        pto::TASSIGN(tile, reinterpret_cast<uint64_t>(dstChunk.GetPhyAddr()));
+        pto::TLOAD(tile, srcGlobal);
+    }
+}
+
+template <typename Element, int TileElems = 1024>
+CATLASS_DEVICE void PtoStoreVector(AscendC::GlobalTensor<Element> const &dst,
+                                   AscendC::LocalTensor<Element> const &src,
+                                   uint32_t elemNum)
+{
+    using PtoTile = pto::Tile<pto::TileType::Vec, Element, 1, TileElems, pto::BLayout::RowMajor, -1, -1>;
+    for (uint32_t offset = 0; offset < elemNum; offset += TileElems) {
+        const uint32_t cur = (elemNum - offset > TileElems) ? TileElems : (elemNum - offset);
+        auto dstChunk = dst[offset];
+        auto srcChunk = src[offset];
+        auto dstGlobal = MakeContiguousGlobal(dstChunk, cur);
+        PtoTile tile(1, cur);
+        pto::TASSIGN(tile, reinterpret_cast<uint64_t>(srcChunk.GetPhyAddr()));
+        pto::TSTORE(dstGlobal, tile);
+    }
+}
+
+}  // namespace kernel_detail
 
 constexpr uint16_t SYNCFLAGC2V = 9;
 constexpr uint16_t SYNCFLAGV2C = 10;
@@ -266,11 +319,6 @@ private:
         AscendC::SetFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID0);
         AscendC::SetFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID1);
 
-        using TType = Gemm::GemmType<T, layout::RowMajor>;
-        using CopyGmToUb = Epilogue::Tile::CopyGm2Ub<ArchTag, TType>;
-        using CopyUbToGm = Epilogue::Tile::CopyUb2Gm<ArchTag, TType>;
-        CopyGmToUb copyGmToUb;
-        CopyUbToGm copyUbToGm;
         constexpr int32_t BufferNum = 2;
         int tmpBufferSize = 32 * 1024 / sizeof(T);   // 32 KB
         AscendC::LocalTensor<T> tmpBuffer1 = resource.ubBuf.template GetBufferByByte<T>(0);
@@ -293,10 +341,10 @@ private:
             // [ReduceScatter] 2. Pre Interface Sync
             AscendC::WaitFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID);
             // [ReduceScatter] 3. Start shmem_mte_get_mem_nbi
-            copyGmToUb(buf, src[inputOffset], layout::RowMajor{ 1, curProcessNum}, layout::RowMajor{1, curProcessNum});
+            kernel_detail::PtoLoadVector(buf, src[inputOffset], curProcessNum);
             AscendC::SetFlag<AscendC::HardEvent::MTE2_MTE3>(EVENT_ID);
             AscendC::WaitFlag<AscendC::HardEvent::MTE2_MTE3>(EVENT_ID);
-            copyUbToGm(dst[outputOffset], buf, layout::RowMajor{ 1, curProcessNum}, layout::RowMajor{1, curProcessNum});
+            kernel_detail::PtoStoreVector(dst[outputOffset], buf, curProcessNum);
 
             // [ReduceScatter] 4. Post Interface Sync
             AscendC::SetFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID);
@@ -688,15 +736,10 @@ private:
             dstAddress.SetGlobalBuffer((__gm__ int32_t * )dstPeermemPtr);
 
             AscendC::SetFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID0);
-            using TType = Gemm::GemmType<int32_t, layout::RowMajor>;
-            using CopyGmToUb = Epilogue::Tile::CopyGm2Ub<ArchTag, TType>;
-            using CopyUbToGm = Epilogue::Tile::CopyUb2Gm<ArchTag, TType>;
             using ShapeDyn = pto::Shape<pto::DYNAMIC, pto::DYNAMIC, pto::DYNAMIC, pto::DYNAMIC, pto::DYNAMIC>;
             using StrideDyn = pto::Stride<pto::DYNAMIC, pto::DYNAMIC, pto::DYNAMIC, pto::DYNAMIC, pto::DYNAMIC>;
             using TputGlobal = pto::GlobalTensor<int32_t, ShapeDyn, StrideDyn, pto::Layout::ND>;
             using TputTile = pto::Tile<pto::TileType::Vec, int32_t, 1, 128, pto::BLayout::RowMajor, -1, -1>;
-            CopyGmToUb copyGmToUb;
-            CopyUbToGm copyUbToGm;
             int64_t scratchOffsetBytes = peermemInfo.offsetPeerPerTokenScale + static_cast<int64_t>(coreIdx) * numPerCore * sizeof(int32_t);
             __gm__ int32_t* localScratch = reinterpret_cast<__gm__ int32_t*>(shmem(scratchOffsetBytes, params.rank));
             AscendC::GlobalTensor<int32_t> localScratchGm;
@@ -707,18 +750,14 @@ private:
 
             AscendC::WaitFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID0);
 
-            copyGmToUb(tmpBuffer, srcAddress[0],
-                layout::RowMajor{ 1, numPerCore},
-                layout::RowMajor{1, numPerCore});
+            kernel_detail::PtoLoadVector(tmpBuffer, srcAddress[0], numPerCore);
 
             AscendC::SetFlag<AscendC::HardEvent::MTE2_V>(EVENT_ID0);
             AscendC::WaitFlag<AscendC::HardEvent::MTE2_V>(EVENT_ID0);
             AscendC::Adds(tmpBuffer, tmpBuffer, 0x800000, numPerCore);
             AscendC::SetFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID0);
             AscendC::WaitFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID0);
-            copyUbToGm(localScratchGm[0], tmpBuffer,
-                layout::RowMajor{ 1, numPerCore},
-                layout::RowMajor{1, numPerCore});
+            kernel_detail::PtoStoreVector(localScratchGm[0], tmpBuffer, numPerCore);
             TputGlobal localPackedG(localScratch, tputShape, tputStride);
             TputGlobal remotePackedG(reinterpret_cast<__gm__ int32_t*>(dstPeermemPtr), tputShape, tputStride);
             pto::comm::TPUT(remotePackedG, localPackedG, tputTile);

@@ -10,11 +10,91 @@
 #include "catlass/detail/callback.hpp"
 
 #include <pto/common/pto_tile.hpp>
+#include <pto/pto-inst.hpp>
 
 #include "hccl_shmem.hpp"
 #include "layout3d.hpp"
 
 namespace Catlass::Epilogue::Block {
+namespace detail {
+
+using PtoShapeDyn = pto::Shape<pto::DYNAMIC, pto::DYNAMIC, pto::DYNAMIC, pto::DYNAMIC, pto::DYNAMIC>;
+using PtoStrideDyn = pto::Stride<pto::DYNAMIC, pto::DYNAMIC, pto::DYNAMIC, pto::DYNAMIC, pto::DYNAMIC>;
+
+template <typename Element>
+using PtoGlobalNd = pto::GlobalTensor<Element, PtoShapeDyn, PtoStrideDyn, pto::Layout::ND>;
+
+template <typename Element>
+CATLASS_DEVICE PtoGlobalNd<Element> MakeContiguousGlobal(AscendC::GlobalTensor<Element> const &tensor, uint32_t elemNum)
+{
+    PtoShapeDyn shape(1, 1, 1, 1, elemNum);
+    PtoStrideDyn stride(elemNum, elemNum, elemNum, elemNum, 1);
+    auto *ptr = const_cast<__gm__ Element *>(tensor.GetPhyAddr());
+    return PtoGlobalNd<Element>(ptr, shape, stride);
+}
+
+template <typename Element, int TileElems = 128>
+CATLASS_DEVICE void PtoLoadVector(AscendC::LocalTensor<Element> const &dst,
+                                  AscendC::GlobalTensor<Element> const &src,
+                                  uint32_t elemNum)
+{
+    using PtoTile = pto::Tile<pto::TileType::Vec, Element, 1, TileElems, pto::BLayout::RowMajor, -1, -1>;
+    for (uint32_t offset = 0; offset < elemNum; offset += TileElems) {
+        const uint32_t cur = (elemNum - offset > TileElems) ? TileElems : (elemNum - offset);
+        auto dstChunk = dst[offset];
+        auto srcChunk = src[offset];
+        auto srcGlobal = MakeContiguousGlobal(srcChunk, cur);
+        PtoTile tile(1, cur);
+        pto::TASSIGN(tile, reinterpret_cast<uint64_t>(dstChunk.GetPhyAddr()));
+        pto::TLOAD(tile, srcGlobal);
+    }
+}
+
+template <typename Element, int TileElems = 128>
+CATLASS_DEVICE void PtoStoreVector(AscendC::GlobalTensor<Element> const &dst,
+                                   AscendC::LocalTensor<Element> const &src,
+                                   uint32_t elemNum)
+{
+    using PtoTile = pto::Tile<pto::TileType::Vec, Element, 1, TileElems, pto::BLayout::RowMajor, -1, -1>;
+    for (uint32_t offset = 0; offset < elemNum; offset += TileElems) {
+        const uint32_t cur = (elemNum - offset > TileElems) ? TileElems : (elemNum - offset);
+        auto dstChunk = dst[offset];
+        auto srcChunk = src[offset];
+        auto dstGlobal = MakeContiguousGlobal(dstChunk, cur);
+        PtoTile tile(1, cur);
+        pto::TASSIGN(tile, reinterpret_cast<uint64_t>(srcChunk.GetPhyAddr()));
+        pto::TSTORE(dstGlobal, tile);
+    }
+}
+
+template <typename Element, int TileElems = 128>
+CATLASS_DEVICE void PtoLoadMatrixRows(AscendC::LocalTensor<Element> const &dst,
+                                      AscendC::GlobalTensor<Element> const &src,
+                                      uint32_t rowNum,
+                                      uint32_t colNum,
+                                      uint32_t dstStride,
+                                      uint32_t srcStride)
+{
+    for (uint32_t rowIdx = 0; rowIdx < rowNum; ++rowIdx) {
+        PtoLoadVector<Element, TileElems>(dst[rowIdx * dstStride], src[rowIdx * srcStride], colNum);
+    }
+}
+
+template <typename Element, int TileElems = 128>
+CATLASS_DEVICE void PtoStoreMatrixRows(AscendC::GlobalTensor<Element> const &dst,
+                                       AscendC::LocalTensor<Element> const &src,
+                                       uint32_t rowNum,
+                                       uint32_t colNum,
+                                       uint32_t dstStride,
+                                       uint32_t srcStride)
+{
+    for (uint32_t rowIdx = 0; rowIdx < rowNum; ++rowIdx) {
+        PtoStoreVector<Element, TileElems>(dst[rowIdx * dstStride], src[rowIdx * srcStride], colNum);
+    }
+}
+
+}  // namespace detail
+
 template <
     uint32_t UB_STAGES_,
     class CType_,
@@ -42,7 +122,6 @@ public:
     using ElementD = typename DType_::Element;
     using LayoutD = typename DType_::Layout;
 
-    using CopyScaleGmToUb = Epilogue::Tile::CopyGm2Ub<ArchTag, Gemm::GemmType<float, layout::VectorLayout>>;
     using CopyGmToUbC = typename TileCopy_::CopyGmToUbC;
     using CopyUbToGmD = typename TileCopy_::CopyUbToGmD;
 
@@ -143,12 +222,8 @@ public:
         auto &ubCFp32 = ubFp32List[is_ping];
         auto &scaleUb = scaleUbList[is_ping];
 
-        LayoutC layoutGM{actualBlockShape.m(), actualBlockShape.n(), params.n2};
-        LayoutC layoutUB{actualBlockShape.m(), actualBlockShape.n(), n0};
-
-
         AscendC::WaitFlag<AscendC::HardEvent::V_MTE2>(event_id);
-        copyGmToUbC(ubC, gmTileC, layoutUB, layoutGM);
+        detail::PtoLoadMatrixRows(ubC, gmTileC, actualBlockShape.m(), actualBlockShape.n(), n0, params.n2);
         AscendC::SetFlag<AscendC::HardEvent::MTE2_V>(event_id);
 
         AscendC::WaitFlag<AscendC::HardEvent::MTE2_V>(event_id);
@@ -160,10 +235,9 @@ public:
         AscendC::WaitFlag<AscendC::HardEvent::S_MTE2>(event_id_2);
 
         int32_t gmScaleOffset = preSrcExpertSum + blockCoord.m();
-        layout::VectorLayout scaleLauout{actualBlockShape.m()};
         if (source_scale_offset[event_id] != gmScaleOffset) {
                 source_scale_offset[event_id] = gmScaleOffset;
-                copyScaleGmToUb(scaleUb, gmPerTokenScale[gmScaleOffset],  scaleLauout, scaleLauout);
+                detail::PtoLoadVector(scaleUb, gmPerTokenScale[gmScaleOffset], actualBlockShape.m());
         }
 
         AscendC::SetFlag<AscendC::HardEvent::MTE2_S>(event_id_2);
@@ -223,10 +297,8 @@ public:
             MatrixCoord dstOffset{dstOffsetInExpert + dstExpertOffset, blockCoord.n()};
             int64_t gmDstOffset = params.layoutC.GetOffset(dstOffset);
             auto gmTileD = gmRemotePeer[gmDstOffset];
-            LayoutC layoutGM2{lenData, actualBlockShape.n(), params.n2};
-            LayoutC layoutUB2{lenData, actualBlockShape.n(), n0};
             if (dstEpIdx == params.rank) {
-                copyUbToGmD(gmTileD, ubD[tileOffset * n0], layoutGM2, layoutUB2);
+                detail::PtoStoreMatrixRows(gmTileD, ubD[tileOffset * n0], lenData, actualBlockShape.n(), params.n2, n0);
             } else {
                 using ShapeDyn = pto::Shape<pto::DYNAMIC, pto::DYNAMIC, pto::DYNAMIC, pto::DYNAMIC, pto::DYNAMIC>;
                 using StrideDyn = pto::Stride<pto::DYNAMIC, pto::DYNAMIC, pto::DYNAMIC, pto::DYNAMIC, pto::DYNAMIC>;
@@ -247,7 +319,7 @@ public:
                 __gm__ ElementD* remotePeerBase = reinterpret_cast<__gm__ ElementD*>(dstPeermemPtr) + gmDstOffset;
 
                 for (uint32_t rowIdx = 0; rowIdx < lenData; ++rowIdx) {
-                    copyUbToGmD(gmLocalScratch[0], ubD[(tileOffset + rowIdx) * n0], layoutScratchRow, layoutUbRow);
+                    detail::PtoStoreVector(gmLocalScratch[0], ubD[(tileOffset + rowIdx) * n0], actualBlockShape.n());
                     TputGlobal localRowG(localScratch, rowShape, localStride);
                     TputGlobal remoteRowG(remotePeerBase + rowIdx * params.n2, rowShape, remoteStride);
                     pto::comm::TPUT(remoteRowG, localRowG, tputTile);
@@ -277,8 +349,6 @@ private:
 
     CopyGmToUbC copyGmToUbC;
     CopyUbToGmD copyUbToGmD;
-    
-    CopyScaleGmToUb copyScaleGmToUb;
     AscendC::GlobalTensor<int32_t> tokenPerExpert;
     Layout3D tokenPerExpertLayout;
 };

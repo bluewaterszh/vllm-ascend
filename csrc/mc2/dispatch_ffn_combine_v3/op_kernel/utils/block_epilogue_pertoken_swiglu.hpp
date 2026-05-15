@@ -19,7 +19,63 @@
 #include "catlass/layout/layout.hpp"
 #include "catlass/detail/callback.hpp"
 
+#include <pto/common/pto_tile.hpp>
+#include <pto/pto-inst.hpp>
+
 namespace Catlass::Epilogue::Block {
+namespace swiglu_detail {
+
+using PtoShapeDyn = pto::Shape<pto::DYNAMIC, pto::DYNAMIC, pto::DYNAMIC, pto::DYNAMIC, pto::DYNAMIC>;
+using PtoStrideDyn = pto::Stride<pto::DYNAMIC, pto::DYNAMIC, pto::DYNAMIC, pto::DYNAMIC, pto::DYNAMIC>;
+
+template <typename Element>
+using PtoGlobalNd = pto::GlobalTensor<Element, PtoShapeDyn, PtoStrideDyn, pto::Layout::ND>;
+
+template <typename Element>
+CATLASS_DEVICE PtoGlobalNd<Element> MakeContiguousGlobal(AscendC::GlobalTensor<Element> const &tensor, uint32_t elemNum)
+{
+    PtoShapeDyn shape(1, 1, 1, 1, elemNum);
+    PtoStrideDyn stride(elemNum, elemNum, elemNum, elemNum, 1);
+    auto *ptr = const_cast<__gm__ Element *>(tensor.GetPhyAddr());
+    return PtoGlobalNd<Element>(ptr, shape, stride);
+}
+
+template <typename Element, int TileElems = 1024>
+CATLASS_DEVICE void PtoLoadVector(AscendC::LocalTensor<Element> const &dst,
+                                  AscendC::GlobalTensor<Element> const &src,
+                                  uint32_t elemNum)
+{
+    using PtoTile = pto::Tile<pto::TileType::Vec, Element, 1, TileElems, pto::BLayout::RowMajor, -1, -1>;
+    for (uint32_t offset = 0; offset < elemNum; offset += TileElems) {
+        const uint32_t cur = (elemNum - offset > TileElems) ? TileElems : (elemNum - offset);
+        auto dstChunk = dst[offset];
+        auto srcChunk = src[offset];
+        auto srcGlobal = MakeContiguousGlobal(srcChunk, cur);
+        PtoTile tile(1, cur);
+        pto::TASSIGN(tile, reinterpret_cast<uint64_t>(dstChunk.GetPhyAddr()));
+        pto::TLOAD(tile, srcGlobal);
+    }
+}
+
+template <typename Element, int TileElems = 1024>
+CATLASS_DEVICE void PtoStoreVector(AscendC::GlobalTensor<Element> const &dst,
+                                   AscendC::LocalTensor<Element> const &src,
+                                   uint32_t elemNum)
+{
+    using PtoTile = pto::Tile<pto::TileType::Vec, Element, 1, TileElems, pto::BLayout::RowMajor, -1, -1>;
+    for (uint32_t offset = 0; offset < elemNum; offset += TileElems) {
+        const uint32_t cur = (elemNum - offset > TileElems) ? TileElems : (elemNum - offset);
+        auto dstChunk = dst[offset];
+        auto srcChunk = src[offset];
+        auto dstGlobal = MakeContiguousGlobal(dstChunk, cur);
+        PtoTile tile(1, cur);
+        pto::TASSIGN(tile, reinterpret_cast<uint64_t>(srcChunk.GetPhyAddr()));
+        pto::TSTORE(dstGlobal, tile);
+    }
+}
+
+}  // namespace swiglu_detail
+
 
 // float scale, dequant per expert
 template <
@@ -57,7 +113,7 @@ public:
         "The element type template parameters of BlockEpilogue are wrong"
     );
     static_assert(
-        std::is_same_v<LayoutC, layout::RowMajor> && 
+        std::is_same_v<LayoutC, layout::RowMajor> &&
             std::is_same_v<LayoutPerTokenScale, layout::VectorLayout> && std::is_same_v<LayoutD, layout::RowMajor>,
         "The layout template parameters of BlockEpilogue are wrong"
     );
@@ -117,7 +173,7 @@ public:
             eventUbDVMTE3List[i] = eventVMTE3++;
 
             AscendC::SetFlag<AscendC::HardEvent::V_MTE2>(eventUbCVMTE2List[i]);
-            AscendC::SetFlag<AscendC::HardEvent::MTE3_V>(eventUbDMTE3VList[i]);  
+            AscendC::SetFlag<AscendC::HardEvent::MTE3_V>(eventUbDMTE3VList[i]);
         }
 
         ubPerTokenScaleOutput = resource.ubBuf.template GetBufferByByte<float>(ubOffset);
@@ -188,7 +244,7 @@ public:
             auto &ubD = ubDList[ubListId];
 
             auto &ubCFp32 = ubCFp32List[ubListId];
-            auto &ubCFp32ChunkN = ubCFp32ChunkNList[ubListId]; 
+            auto &ubCFp32ChunkN = ubCFp32ChunkNList[ubListId];
             auto &ubAbs = ubCFp32ChunkNAbsList[ubListId];
             // auto &ubMax = ubCFp32ChunkNMaxList[ubListId];
             auto &ubReduceMax = ubCFp32ChunkNMaxList[ubListId];
@@ -198,11 +254,9 @@ public:
             auto &ubQuantF16 = ubQuantF16List[ubListId];
 
             auto gmTileD = gmD[loopIdx * ChunkTileLen];
-            LayoutC layoutUbC{1, blockN};
-
             // Move C from GM workspace to UB
             AscendC::WaitFlag<AscendC::HardEvent::V_MTE2>(eventUbCVMTE2List[ubListId]);
-            copyGmToUbC(ubC, gmTileC, layoutUbC, layoutUbC);
+            swiglu_detail::PtoLoadVector(ubC, gmTileC, blockN);
             AscendC::SetFlag<AscendC::HardEvent::MTE2_V>(eventUbCMTE2VList[ubListId]);
 
             // Cast C to FP32 in UB
@@ -231,7 +285,7 @@ public:
             AscendC::Div(ubCFp32ChunkN, ubCFp32, ubCFp32ChunkN, ChunkTileLen);
             AscendC::PipeBarrier<PIPE_V>();
             AscendC::Mul(ubCFp32ChunkN, ubCFp32ChunkN, ubCFp32[ChunkTileLen], ChunkTileLen);
-            
+
             // Quantization process; difference between the two approaches
             AscendC::PipeBarrier<PIPE_V>();
             AscendC::Abs(ubAbs, ubCFp32ChunkN, ChunkTileLen);
@@ -239,7 +293,7 @@ public:
 
             AscendC::ReduceMax<float>(ubReduceMax, ubAbs, sharedUbTmpBuffer, ChunkTileLen, false);
             AscendC::PipeBarrier<PIPE_V>();
-            
+
             AscendC::SetFlag<AscendC::HardEvent::V_S>(0);
             AscendC::WaitFlag<AscendC::HardEvent::V_S>(0);
 
@@ -263,24 +317,21 @@ public:
             AscendC::WaitFlag<AscendC::HardEvent::MTE3_V>(eventUbDVMTE3List[ubListId]);
             AscendC::Cast(ubD, ubQuantF16, AscendC::RoundMode::CAST_RINT, ChunkTileLen);
             // AscendC::Muls(ubD, ubCFp32ChunkN, 127.f / GMubDequantScale, ChunkTileLen);
-            AscendC::SetFlag<AscendC::HardEvent::V_MTE3>(eventUbDMTE3VList[ubListId]);         
+            AscendC::SetFlag<AscendC::HardEvent::V_MTE3>(eventUbDMTE3VList[ubListId]);
 
-            LayoutD layoutUbD{1, ChunkTileLen};
             AscendC::WaitFlag<AscendC::HardEvent::V_MTE3>(eventUbDVMTE3List[ubListId]);
-            copyUbToGmD(gmTileD, ubD, layoutUbD, layoutUbD);
+            swiglu_detail::PtoStoreVector(gmTileD, ubD, ChunkTileLen);
             AscendC::SetFlag<AscendC::HardEvent::MTE3_V>(eventUbDMTE3VList[ubListId]);
             ubListId = (ubListId + 1 < UB_STAGES) ? (ubListId + 1) : 0;
         }
 
         if(tasksForIdx > 0){
-            LayoutPerTokenScale layoutGmPerTokenScale2{tasksForIdx};
-
             AscendC::SetFlag<AscendC::HardEvent::S_MTE3>(EVENT_ID0);
             AscendC::WaitFlag<AscendC::HardEvent::S_MTE3>(EVENT_ID0);
 
-            copyUbToGmDequantScale(gmPerTokenScale2[loopStartIdx], ubPerTokenScaleOutput[0], layoutGmPerTokenScale2, layoutGmPerTokenScale2);
+            swiglu_detail::PtoStoreVector(gmPerTokenScale2[loopStartIdx], ubPerTokenScaleOutput[0], tasksForIdx);
         }
-        
+
 
     }
 

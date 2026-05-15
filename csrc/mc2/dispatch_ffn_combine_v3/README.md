@@ -271,3 +271,101 @@ Delta of the store-shell follow-up vs the pre-Stage-3a v3 baseline:
 Interpretation:
 - The Stage 3a bring-up regression was mainly in the scale/fixpipe/store shell, not in the PTO matmul seam alone.
 - After aligning that shell with the PTO-style path, the large case is back to essentially baseline-level performance and the small case kernel time is now lower than the pre-Stage-3a v3 baseline.
+
+## Stage 3b first safe seam
+
+Current status:
+- A first Stage 3b attempt in the SwiGLU epilogue path was rolled back because that seam caused a clear regression.
+- The current kept seam is smaller: `BlockEpilogue3` now loads the per-token scale vector with PTO `TLOAD`, while the main C/D data path stays on the existing shell.
+- Both reference cases still PASS after this change.
+
+Reference commands:
+
+```bash
+bash csrc/mc2/dispatch_ffn_combine_v3/run.sh \
+  --soc ascend910_93 \
+  --world-size 2 \
+  --m 16 \
+  --k 128 \
+  --n 128 \
+  --topk 2 \
+  --experts 2 \
+  --max-output-size 32
+
+bash csrc/mc2/dispatch_ffn_combine_v3/run.sh \
+  --soc ascend910_93 \
+  --world-size 2 \
+  --m 2049 \
+  --k 128 \
+  --n 128 \
+  --topk 2 \
+  --experts 2 \
+  --max-output-size 4098
+```
+
+Observed results:
+
+| case | version | kernel avg (us) | e2e avg (us) | accuracy |
+| --- | --- | ---: | ---: | --- |
+| small `m=16, k=128, n=128, topk=2, max_output_size=32` | Stage 3a store-shell follow-up | 23.68 | 101.54 | PASS |
+| small `m=16, k=128, n=128, topk=2, max_output_size=32` | Stage 3b first safe seam | 31.53 | 124.67 | PASS |
+| large `m=2049, k=128, n=128, topk=2, max_output_size=4098` | Stage 3a store-shell follow-up | 28.10 | 117.65 | PASS |
+| large `m=2049, k=128, n=128, topk=2, max_output_size=4098` | Stage 3b first safe seam | 30.04 | 116.40 | PASS |
+
+Delta of the first safe seam vs the Stage 3a store-shell follow-up:
+- small case: kernel `+33.2%`, e2e `+22.8%`
+- large case: kernel `+6.9%`, e2e `-1.1%`
+
+Interpretation:
+- The per-token scale vector load is a small enough PTO seam to keep moving Stage 3b forward without reopening the large-case regression.
+- The small case remains noisier, so the large case is the better stability reference for the next Stage 3b steps.
+
+## Stage 3b regression trend notes
+
+Current policy for the remaining Stage 3b seams:
+- keep moving the functional PTO migration forward;
+- record every observed regression trend as follow-up optimization input;
+- avoid treating any single exploratory run as a new baseline unless it is measured on the same loop.
+- keep the functionally-correct seam bundles enabled unless they break output contracts or the build.
+
+Stability loop used for the entries below:
+- large case only: `m=2049, k=128, n=128, topk=2, max_output_size=4098`
+- no rebuild between runs when only the runtime path is being compared
+- `warmup=5`, `measure=20`
+
+Reference on the kept seam set at the start of this log:
+- current kept seam set: `BlockEpilogue3` scale-vector `TLOAD` only
+- observed large-case result on the stability loop: kernel `25.98 us`, e2e `85.60 us`, `PASS`
+
+Observed regression entries on the same stability loop:
+
+| seam | scope | kernel avg (us) | e2e avg (us) | delta vs kept seam set | accuracy | status |
+| --- | --- | ---: | ---: | --- | --- | --- |
+| SwiGLU final dequant-scale writeback PTO | `block_epilogue_pertoken_swiglu.hpp` tail writeback | 38.84 | 108.51 | kernel `+49.5%`, e2e `+26.8%` | PASS | reverted |
+| SwiGLU input per-token-scale preload PTO | `block_epilogue_pertoken_swiglu.hpp` per-token scale ingress | 60.93 | 148.65 | kernel `+134.5%`, e2e `+73.7%` | PASS | reverted |
+| Remote scratch-store PTO bundle | `BlockEpilogue2/3` remote-only local-scratch store before `TPUT` | 47.07 | 126.48 | kernel `+81.2%`, e2e `+47.8%` | PASS | kept for function-first |
+| Full Stage 3b function-first bundle | all remaining epilogue GM↔UB shells plus `dispatch_ffn_combine_kernel.hpp` copy helpers | 35.67 | 106.14 | kernel `+37.3%`, e2e `+24.0%` | PASS | kept |
+
+Related historical trend from earlier Stage 3b attempts:
+- PTO-izing the remote scratch-store shell in `BlockEpilogue2/3` repeatedly interacted badly with the large-case path.
+- The symptom pattern is consistent across those attempts: functional `PASS`, but either build friction at the helper/seam boundary or renewed large-case performance regression after the seam is enabled.
+- Treat the remote scratch-store shell and the SwiGLU scale I/O shell as the two main regression clusters for the later optimization pass.
+
+Current function-first state after the latest validation pass:
+- kept seam set first expanded to include the earlier `BlockEpilogue3` scale-vector `TLOAD` plus the `BlockEpilogue2/3` remote scratch-store PTO bundle.
+- reference functional regression pass at that intermediate point: small case `29.07 us / 108.95 us`, large case `40.10 us / 131.68 us`, both `PASS`.
+
+## Stage 3b function-first completion
+
+Current status:
+- all remaining epilogue GM↔UB shells are now on PTO `TLOAD/TSTORE`, including:
+  - `block_epilogue_pertoken_row.hpp` local row load/store shell
+  - `block_epilogue_pertoken_v2.hpp` main 2D tile load/store shell
+  - `block_epilogue_pertoken_swiglu.hpp` input/output shell and tail dequant-scale writeback
+- the remaining generic copy helpers in `dispatch_ffn_combine_kernel.hpp` are also on PTO vector load/store.
+- Stage 3b functionality is considered complete: both reference cases still `PASS`.
+- Performance is intentionally not re-tuned here; use the stability-loop row above as the starting point for the later optimization pass.
+
+Reference functional regression pass after the full Stage 3b bundle:
+- small case: kernel `27.90 us`, e2e `121.41 us`, `PASS`
+- large case: kernel `51.60 us`, e2e `149.54 us`, `PASS`
