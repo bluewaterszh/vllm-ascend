@@ -27,7 +27,7 @@ export MPI_ENV_LIB=/home/ntlab/miniconda3/envs/ltr_pto/lib
 export MPI_LIB_PATH=${MPI_ENV_LIB}/libmpi.so
 export MPI_RUNNER=mpirun
 
-bash standalone/dispatch_ffn_combine_v3/run.sh \
+bash csrc/mc2/dispatch_ffn_combine_v3/run.sh \
   --soc ascend910_93 \
   --world-size 2 \
   --m 16 \

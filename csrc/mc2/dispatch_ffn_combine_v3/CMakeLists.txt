@@ -20,7 +20,7 @@ if(NOT DEFINED ENV{ASCEND_HOME_PATH})
 endif()
 set(ASCEND_HOME_PATH $ENV{ASCEND_HOME_PATH})
 set(ASCEND_CANN_PACKAGE_PATH ${ASCEND_HOME_PATH})
-set(CATLASS_INCLUDE ${CMAKE_CURRENT_SOURCE_DIR}/../../csrc/third_party/catlass/include)
+set(CATLASS_INCLUDE ${CMAKE_CURRENT_SOURCE_DIR}/../../third_party/catlass/include)
 set(SOC_VERSION "ascend910_93" CACHE STRING "Ascend SoC version")
 
 if(SOC_VERSION STREQUAL "ascend910_93")
