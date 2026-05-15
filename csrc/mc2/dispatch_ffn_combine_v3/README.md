@@ -88,3 +88,45 @@ The perf summary uses logical workload stored in `case.json`:
 - `comm_bytes_all_ranks`
 
 These are equivalent metrics derived from the routed workload. They are useful for steady-state comparison across cases, but they are not hardware counters and should not be interpreted as literal on-chip compute or link bandwidth measurements.
+
+## Stage 1 reference A/B
+
+Reference commits:
+- baseline before PTO-style HCCL context: `f7bf62cb`
+- Stage 1 HCCL context / shmem migration: `5db0ebc7`
+
+Reference case:
+
+```bash
+bash csrc/mc2/dispatch_ffn_combine_v3/run.sh \
+  --soc ascend910_93 \
+  --world-size 2 \
+  --m 16 \
+  --k 128 \
+  --n 128 \
+  --topk 2 \
+  --experts 2 \
+  --max-output-size 32
+```
+
+If the baseline commit is checked out in a detached worktree, initialize the CATLASS submodule first:
+
+```bash
+git -C <worktree> submodule update --init --recursive csrc/third_party/catlass
+```
+
+Observed results:
+
+| version | run | kernel avg (us) | e2e avg (us) | accuracy |
+| --- | --- | ---: | ---: | --- |
+| baseline `f7bf62cb` | 1 | 32.08 | 117.14 | PASS |
+| baseline `f7bf62cb` | 2 | 35.79 | 118.61 | PASS |
+| Stage 1 `5db0ebc7` | 1 | 42.31 | 134.34 | PASS |
+| Stage 1 `5db0ebc7` | 2 | 42.00 | 132.98 | PASS |
+
+Averages across the two runs:
+- baseline: kernel `33.94 us`, e2e `117.88 us`
+- Stage 1: kernel `42.16 us`, e2e `133.66 us`
+- delta vs baseline: kernel `+24.2%`, e2e `+13.4%`
+
+Use this as the current performance reference before Stage 2 communication-primitive migration.

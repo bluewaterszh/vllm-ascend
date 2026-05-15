@@ -5,6 +5,10 @@
 #include "kernel_operator.h"
 #include "const_args.hpp"
 
+#if !defined(__CCE_KT_TEST__) && defined(__CCE_AICORE__)
+#include "pto/comm/pto_comm_inst.hpp"
+#endif
+
 #ifdef HCCL_COMM
 #include "moe_distribute_base.h"
 using namespace AscendC::HcclContextDef;
@@ -31,6 +35,10 @@ constexpr uint16_t RECV_SYNC_EVENT_ID = 10;
 
 constexpr uint32_t SELF_STATE_OFFSET = 256 * 1024;
 constexpr uint32_t STATE_OFFSET = 512;
+constexpr uint32_t BARRIER_COUNTER_STRIDE = 16;
+constexpr uint32_t BARRIER_EPOCH_INDEX = 2048;
+constexpr uint32_t TOKEN_READY_BASE_INDEX = 4096;
+constexpr uint32_t TOKEN_READY_STRIDE = 16;
 
 FORCE_INLINE_AICORE void AicSyncAll() {
     AscendC::CrossCoreSetFlag<0x0, PIPE_FIX>(8);
@@ -59,7 +67,23 @@ FORCE_INLINE_AICORE void gm_dcci(__gm__ T * addr) {
     __asm__ __volatile__("");
 }
 
+#if !defined(__CCE_KT_TEST__) && defined(__CCE_AICORE__)
+FORCE_INLINE_AICORE void pto_signal_notify_add(__gm__ int32_t *sig_addr, int32_t value = 1) {
+    pto::comm::Signal sig(sig_addr);
+    pto::comm::TNOTIFY(sig, value, pto::comm::NotifyOp::AtomicAdd);
+}
+
+FORCE_INLINE_AICORE void pto_signal_wait_ge(__gm__ int32_t *sig_addr, int32_t cmp_val) {
+    pto::comm::Signal sig(sig_addr);
+    pto::comm::TWAIT(sig, cmp_val, pto::comm::WaitCmp::GE);
+}
+#endif
+
 FORCE_INLINE_AICORE int32_t gm_signal_wait_until_eq_for_barrier(__gm__ int32_t *sig_addr, int32_t cmp_val) {
+#if !defined(__CCE_KT_TEST__) && defined(__CCE_AICORE__)
+    pto_signal_wait_ge(sig_addr, cmp_val);
+    return cmp_val;
+#else
     do {
         gm_dcci((__gm__ uint8_t *)sig_addr);
         if (*sig_addr == cmp_val) {
@@ -70,9 +94,14 @@ FORCE_INLINE_AICORE int32_t gm_signal_wait_until_eq_for_barrier(__gm__ int32_t *
         }
     } while (true);
     return -1;
+#endif
 }
 
 FORCE_INLINE_AICORE void gm_signal_wait_until_ne(__gm__ int32_t *sig_addr, int32_t cmp_val) {
+#if !defined(__CCE_KT_TEST__) && defined(__CCE_AICORE__)
+    pto_signal_wait_ge(sig_addr, cmp_val + 1);
+    return;
+#else
     do {
         AscendC::LocalTensor<int32_t> ub;
         ub.address_.logicPos = static_cast<uint8_t>(AscendC::TPosition::VECIN);
@@ -87,6 +116,7 @@ FORCE_INLINE_AICORE void gm_signal_wait_until_ne(__gm__ int32_t *sig_addr, int32
         }
     } while (true);
     return;
+#endif
 }
 
 
@@ -168,6 +198,32 @@ public:
         return m_rankSize;
     }
 
+    FORCE_INLINE_AICORE
+    void ResetLocalTokenReady() {
+        int vec_id = AscendC::GetBlockIdx();
+        int vec_size = AscendC::GetBlockNum() * AscendC::GetTaskRation();
+        for (int i = vec_id; i < m_rankSize; i += vec_size) {
+            gm_store(LocalTokenReadyCounter(i), 0);
+        }
+    }
+
+    FORCE_INLINE_AICORE
+    void NotifyRemoteTokenReady(int32_t rankId) {
+#if !defined(__CCE_KT_TEST__) && defined(__CCE_AICORE__)
+        AscendC::PipeBarrier<PIPE_ALL>();
+        dsb(DSB_DDR);
+        pto_signal_notify_add(RemoteTokenReadyCounter(rankId, m_rank));
+#else
+        gm_store(RemoteTokenReadyCounter(rankId, m_rank), 1);
+        gm_dcci((__gm__ uint8_t*)RemoteTokenReadyCounter(rankId, m_rank));
+#endif
+    }
+
+    FORCE_INLINE_AICORE
+    void WaitTokenReady(int32_t srcRank) {
+        gm_signal_wait_until_ne(LocalTokenReadyCounter(srcRank), 0);
+    }
+
 
     FORCE_INLINE_AICORE
     ~HcclShmem() {
@@ -176,17 +232,23 @@ public:
 
     FORCE_INLINE_AICORE
     void CrossRankSync() {
-        uint64_t flag_offset = (m_segmentSize - MB_SIZE) / sizeof(int32_t);
-        __gm__ int32_t* sync_counter = (__gm__ int32_t*)(*this)() + flag_offset;
-        __gm__ int32_t* sync_base = (__gm__ int32_t*)(*this)() + flag_offset + 2048;
+        __gm__ int32_t* sync_base = LocalBarrierEpoch();
         int count = gm_load(sync_base) + 1;
         int vec_id = AscendC::GetBlockIdx();
         int vec_size = AscendC::GetBlockNum() * AscendC::GetTaskRation();
+        AscendC::PipeBarrier<PIPE_ALL>();
+#if !defined(__CCE_KT_TEST__) && defined(__CCE_AICORE__)
+        dsb(DSB_DDR);
+#endif
         for(int i = vec_id; i < m_rankSize; i += vec_size) {
-            __gm__ int32_t* sync_remote = (__gm__ int32_t*)((*this)(i)) + flag_offset + m_rank * 16;
+#if !defined(__CCE_KT_TEST__) && defined(__CCE_AICORE__)
+            pto_signal_notify_add(RemoteBarrierCounter(i, m_rank));
+#else
+            __gm__ int32_t* sync_remote = RemoteBarrierCounter(i, m_rank);
             gm_store(sync_remote, count);
             gm_dcci((__gm__ uint8_t*)sync_remote);
-            auto sync_check = sync_counter + i * 16;
+#endif
+            auto sync_check = LocalBarrierCounter(i);
             gm_signal_wait_until_eq_for_barrier(sync_check, count);
         }
 
@@ -320,11 +382,50 @@ public:
 
     FORCE_INLINE_AICORE
     __gm__ int32_t* SyncBaseAddr() {
-        uint64_t flag_offset = (m_segmentSize - MB_SIZE) / sizeof(int32_t);
-        return (__gm__ int32_t*)(*this)() + flag_offset + 2048;
+        return LocalBarrierEpoch();
     }
 
 private:
+    FORCE_INLINE_AICORE
+    uint64_t SignalRegionOffsetBytes() const {
+        return m_segmentSize - MB_SIZE;
+    }
+
+    FORCE_INLINE_AICORE
+    __gm__ int32_t* LocalSignalBase() const {
+        return reinterpret_cast<__gm__ int32_t*>((*this)() + SignalRegionOffsetBytes());
+    }
+
+    FORCE_INLINE_AICORE
+    __gm__ int32_t* RemoteSignalBase(int32_t rankId) const {
+        return reinterpret_cast<__gm__ int32_t*>((*this)(SignalRegionOffsetBytes(), rankId));
+    }
+
+    FORCE_INLINE_AICORE
+    __gm__ int32_t* LocalBarrierCounter(int32_t srcRank) const {
+        return LocalSignalBase() + srcRank * BARRIER_COUNTER_STRIDE;
+    }
+
+    FORCE_INLINE_AICORE
+    __gm__ int32_t* RemoteBarrierCounter(int32_t rankId, int32_t srcRank) const {
+        return RemoteSignalBase(rankId) + srcRank * BARRIER_COUNTER_STRIDE;
+    }
+
+    FORCE_INLINE_AICORE
+    __gm__ int32_t* LocalBarrierEpoch() const {
+        return LocalSignalBase() + BARRIER_EPOCH_INDEX;
+    }
+
+    FORCE_INLINE_AICORE
+    __gm__ int32_t* LocalTokenReadyCounter(int32_t srcRank) const {
+        return LocalSignalBase() + TOKEN_READY_BASE_INDEX + srcRank * TOKEN_READY_STRIDE;
+    }
+
+    FORCE_INLINE_AICORE
+    __gm__ int32_t* RemoteTokenReadyCounter(int32_t rankId, int32_t srcRank) const {
+        return RemoteSignalBase(rankId) + TOKEN_READY_BASE_INDEX + srcRank * TOKEN_READY_STRIDE;
+    }
+
     #ifndef HCCL_COMM
         __gm__ StandaloneHcclDeviceContext *standaloneCtx_ = nullptr;
     #endif

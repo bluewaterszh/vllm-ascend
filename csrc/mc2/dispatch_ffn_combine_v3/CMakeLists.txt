@@ -21,7 +21,12 @@ endif()
 set(ASCEND_HOME_PATH $ENV{ASCEND_HOME_PATH})
 set(ASCEND_CANN_PACKAGE_PATH ${ASCEND_HOME_PATH})
 set(CATLASS_INCLUDE ${CMAKE_CURRENT_SOURCE_DIR}/../../third_party/catlass/include)
+set(PTO_ROOT "/home/ntlab/zy/code/zhangyuan/pto-isa-zy" CACHE PATH "Path to PTO ISA repository")
 set(SOC_VERSION "ascend910_93" CACHE STRING "Ascend SoC version")
+
+if(NOT EXISTS ${PTO_ROOT}/include/pto/pto-inst.hpp)
+    message(FATAL_ERROR "PTO headers not found under PTO_ROOT=${PTO_ROOT}")
+endif()
 
 if(SOC_VERSION STREQUAL "ascend910_93")
     set(ASCENDC_SOC_VERSION "ascend910_9391")
@@ -61,6 +66,7 @@ ascendc_include_directories(dispatch_ffn_combine_v3_kernel PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/op_kernel
     ${CMAKE_CURRENT_SOURCE_DIR}/op_kernel/utils
     ${CMAKE_CURRENT_SOURCE_DIR}/op_kernel/moe_init_routing_quant_v2
+    ${PTO_ROOT}/include
     ${ASCEND_HOME_PATH}/include
     ${ASCEND_HOME_PATH}/aarch64-linux/ascendc/include/basic_api
     ${ASCEND_HOME_PATH}/aarch64-linux/include/ascendc/basic_api
@@ -77,6 +83,7 @@ ascendc_compile_options(dispatch_ffn_combine_v3_kernel PRIVATE
 
 ascendc_compile_definitions(dispatch_ffn_combine_v3_kernel PRIVATE
     HCCL_COMM
+    PTO_NPU_ARCH_A2A3
     CATLASS_ARCH=2201
     DTYPE_W1=int8_t
     DTYPE_OUT=half
