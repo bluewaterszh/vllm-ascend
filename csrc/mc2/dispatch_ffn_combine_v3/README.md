@@ -171,3 +171,103 @@ Delta of current v3 vs v2:
 - routed throughput: `+14.0%`
 
 This is the latest same-shape reference after the AICORE-only cleanup.
+
+## Stage 3a bring-up reference
+
+Current status:
+- Stage 3a has switched the core L0 matmul primitive in `BlockMmad` to PTO `TMATMUL / TMATMUL_ACC`.
+- The current goal is functional bring-up first: keep accuracy and existing output contracts stable before tuning performance.
+- Both the small case and the `CombineV1` large case still pass after the Stage 3a matmul swap.
+
+Reference commands:
+
+```bash
+bash csrc/mc2/dispatch_ffn_combine_v3/run.sh \
+  --soc ascend910_93 \
+  --world-size 2 \
+  --m 16 \
+  --k 128 \
+  --n 128 \
+  --topk 2 \
+  --experts 2 \
+  --max-output-size 32
+
+bash csrc/mc2/dispatch_ffn_combine_v3/run.sh \
+  --soc ascend910_93 \
+  --world-size 2 \
+  --m 2049 \
+  --k 128 \
+  --n 128 \
+  --topk 2 \
+  --experts 2 \
+  --max-output-size 4098
+```
+
+Observed results vs the pre-Stage-3a v3 baseline:
+
+| case | version | kernel avg (us) | e2e avg (us) | accuracy |
+| --- | --- | ---: | ---: | --- |
+| small `m=16, k=128, n=128, topk=2, max_output_size=32` | pre-Stage-3a v3 | 27.26 | 97.78 | PASS |
+| small `m=16, k=128, n=128, topk=2, max_output_size=32` | Stage 3a bring-up | 43.79 | 145.53 | PASS |
+| large `m=2049, k=128, n=128, topk=2, max_output_size=4098` | pre-Stage-3a v3 | 29.60 | 119.29 | PASS |
+| large `m=2049, k=128, n=128, topk=2, max_output_size=4098` | Stage 3a bring-up | 49.01 | 153.74 | PASS |
+
+Delta of Stage 3a bring-up vs the pre-Stage-3a v3 baseline:
+- small case: kernel `+60.6%`, e2e `+48.8%`
+- large case: kernel `+65.6%`, e2e `+28.9%`
+
+Interpretation:
+- Functionality is already open: the PTO matmul seam produces correct outputs on both validation cases.
+- Performance is not yet acceptable; the current regression is expected follow-up work for the next tuning step.
+
+## Stage 3a store-shell follow-up
+
+Current status:
+- Stage 3a now also aligns the per-channel scale staging and accumulator store path with the PTO-style shell.
+- The matmul seam and output contracts remain unchanged: both reference cases still PASS.
+- This follow-up recovers the large bring-up regression while keeping the Stage 3a functionality open.
+
+Reference commands:
+
+```bash
+bash csrc/mc2/dispatch_ffn_combine_v3/run.sh \
+  --soc ascend910_93 \
+  --world-size 2 \
+  --m 16 \
+  --k 128 \
+  --n 128 \
+  --topk 2 \
+  --experts 2 \
+  --max-output-size 32
+
+bash csrc/mc2/dispatch_ffn_combine_v3/run.sh \
+  --soc ascend910_93 \
+  --world-size 2 \
+  --m 2049 \
+  --k 128 \
+  --n 128 \
+  --topk 2 \
+  --experts 2 \
+  --max-output-size 4098
+```
+
+Observed results:
+
+| case | version | kernel avg (us) | e2e avg (us) | accuracy |
+| --- | --- | ---: | ---: | --- |
+| small `m=16, k=128, n=128, topk=2, max_output_size=32` | Stage 3a bring-up | 43.79 | 145.53 | PASS |
+| small `m=16, k=128, n=128, topk=2, max_output_size=32` | Stage 3a store-shell follow-up | 23.68 | 101.54 | PASS |
+| large `m=2049, k=128, n=128, topk=2, max_output_size=4098` | Stage 3a bring-up | 49.01 | 153.74 | PASS |
+| large `m=2049, k=128, n=128, topk=2, max_output_size=4098` | Stage 3a store-shell follow-up | 28.10 | 117.65 | PASS |
+
+Delta of the store-shell follow-up vs the Stage 3a bring-up:
+- small case: kernel `-45.9%`, e2e `-30.2%`
+- large case: kernel `-42.7%`, e2e `-23.5%`
+
+Delta of the store-shell follow-up vs the pre-Stage-3a v3 baseline:
+- small case: kernel `-13.1%`, e2e `+3.8%`
+- large case: kernel `-5.1%`, e2e `-1.4%`
+
+Interpretation:
+- The Stage 3a bring-up regression was mainly in the scale/fixpipe/store shell, not in the PTO matmul seam alone.
+- After aligning that shell with the PTO-style path, the large case is back to essentially baseline-level performance and the small case kernel time is now lower than the pre-Stage-3a v3 baseline.

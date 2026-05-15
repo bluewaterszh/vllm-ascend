@@ -18,9 +18,144 @@
 #include "catlass/gemm/dispatch_policy.hpp"
 #include "catlass/gemm/helper.hpp"
 #include "dispatch_policy_custom.hpp"
-
+#include "pto/common/pto_tile.hpp"
+#include "pto/pto-inst.hpp"
 
 namespace Catlass::Gemm::Block {
+namespace detail {
+
+using PtoShapeDyn = pto::Shape<pto::DYNAMIC, pto::DYNAMIC, pto::DYNAMIC, pto::DYNAMIC, pto::DYNAMIC>;
+using PtoStrideDyn = pto::Stride<pto::DYNAMIC, pto::DYNAMIC, pto::DYNAMIC, pto::DYNAMIC, pto::DYNAMIC>;
+
+template <typename TileAcc, typename TileLeft, typename TileRight>
+CATLASS_DEVICE void LaunchPtoMatmul(TileAcc &cTile, TileLeft &aTile, TileRight &bTile, bool initC,
+                                           uint8_t unitFlag)
+{
+    const bool isFinal = (unitFlag == 0b11);
+    const bool isPartial = (unitFlag == 0b10);
+
+    if (initC) {
+        if (isFinal) {
+            pto::TMATMUL<pto::AccPhase::Final>(cTile, aTile, bTile);
+        } else if (isPartial) {
+            pto::TMATMUL<pto::AccPhase::Partial>(cTile, aTile, bTile);
+        } else {
+            pto::TMATMUL(cTile, aTile, bTile);
+        }
+    } else {
+        if (isFinal) {
+            pto::TMATMUL_ACC<pto::AccPhase::Final>(cTile, aTile, bTile);
+        } else if (isPartial) {
+            pto::TMATMUL_ACC<pto::AccPhase::Partial>(cTile, aTile, bTile);
+        } else {
+            pto::TMATMUL_ACC(cTile, aTile, bTile);
+        }
+    }
+}
+
+template <typename ElementAccumulator, typename ElementA, typename ElementB, class L0TileShape>
+CATLASS_DEVICE void PtoTileMmad(AscendC::LocalTensor<ElementAccumulator> const &l0CTensor,
+                                       AscendC::LocalTensor<ElementA> const &l0ATensor,
+                                       AscendC::LocalTensor<ElementB> const &l0BTensor,
+                                       uint32_t m, uint32_t n, uint32_t k,
+                                       bool initC = true, uint8_t unitFlag = 0)
+{
+    using LeftTile = pto::TileLeft<ElementA, L0TileShape::M, L0TileShape::K, pto::DYNAMIC, pto::DYNAMIC>;
+    using RightTile = pto::TileRight<ElementB, L0TileShape::K, L0TileShape::N, pto::DYNAMIC, pto::DYNAMIC>;
+    using AccTile = pto::TileAccCompact<ElementAccumulator, L0TileShape::M, L0TileShape::N, pto::DYNAMIC,
+                                        pto::DYNAMIC>;
+
+    LeftTile aTile(m, k);
+    RightTile bTile(k, n);
+    AccTile cTile(m, n);
+
+    pto::TASSIGN(aTile, reinterpret_cast<uint64_t>(l0ATensor.GetPhyAddr()));
+    pto::TASSIGN(bTile, reinterpret_cast<uint64_t>(l0BTensor.GetPhyAddr()));
+    pto::TASSIGN(cTile, reinterpret_cast<uint64_t>(l0CTensor.GetPhyAddr()));
+
+    LaunchPtoMatmul(cTile, aTile, bTile, initC, unitFlag);
+
+    constexpr uint32_t kPipeBarrierThreshold = 10;
+    constexpr uint32_t kFractalEdge = 16;
+    if ((m / kFractalEdge) * (n / kFractalEdge) < kPipeBarrierThreshold) {
+        AscendC::PipeBarrier<PIPE_M>();
+    }
+}
+
+template <typename ElementDst, typename ElementAccumulator, int Rows, int Cols, bool ReluEnable = false>
+CATLASS_DEVICE void PtoStoreAccToGm(AscendC::GlobalTensor<ElementDst> const &dst,
+                                    AscendC::LocalTensor<ElementAccumulator> const &src,
+                                    AscendC::LocalTensor<uint64_t> const &scale,
+                                    layout::RowMajor const &dstLayout)
+{
+    using GlobalDataOut = pto::GlobalTensor<ElementDst, PtoShapeDyn, PtoStrideDyn, pto::Layout::ND>;
+    using AccTile = pto::TileAccCompact<ElementAccumulator, Rows, Cols, pto::DYNAMIC, pto::DYNAMIC>;
+    using ScalingTile = pto::Tile<pto::TileType::Scaling, uint64_t, 1, Cols, pto::BLayout::RowMajor, 1,
+                                  pto::DYNAMIC, pto::SLayout::NoneBox>;
+
+    const int validRow = static_cast<int>(dstLayout.shape(0));
+    const int validCol = static_cast<int>(dstLayout.shape(1));
+    const int64_t leadingDim = static_cast<int64_t>(dstLayout.stride(0));
+
+    PtoShapeDyn shape(1, 1, 1, validRow, validCol);
+    PtoStrideDyn stride(validRow * leadingDim, validRow * leadingDim, validRow * leadingDim, leadingDim, 1);
+
+    auto *dstPtr = const_cast<__gm__ ElementDst *>(dst.GetPhyAddr());
+    GlobalDataOut dstGlobal(dstPtr, shape, stride);
+    AccTile accTile(validRow, validCol);
+    ScalingTile scalingTile(validCol);
+
+    pto::TASSIGN(accTile, reinterpret_cast<uint64_t>(src.GetPhyAddr()));
+    pto::TASSIGN(scalingTile, reinterpret_cast<uint64_t>(scale.GetPhyAddr()));
+
+    if constexpr (ReluEnable) {
+        constexpr auto reluMode = pto::ReluPreMode::NormalRelu;
+        pto::TSTORE_FP<AccTile, GlobalDataOut, ScalingTile, pto::AtomicType::AtomicNone, reluMode>(
+            dstGlobal, accTile, scalingTile);
+    } else {
+        pto::TSTORE_FP<AccTile, GlobalDataOut, ScalingTile>(dstGlobal, accTile, scalingTile);
+    }
+}
+
+template <typename CopyGmToL1S, typename CopyL1ToFP>
+CATLASS_DEVICE void StagePerChannelScale(CopyGmToL1S &copyGmToL1S,
+                                         CopyL1ToFP &copyL1ToFP,
+                                         AscendC::LocalTensor<uint64_t> const &l1STensor,
+                                         AscendC::LocalTensor<uint64_t> const &fixpipeBuf,
+                                         AscendC::GlobalTensor<uint64_t> const &gmBlockS,
+                                         layout::VectorLayout const &layoutScale,
+                                         uint32_t cols)
+{
+    auto layoutTileS = layoutScale.GetTileLayout(MakeCoord(cols));
+    layout::VectorLayout layoutFpBuf{cols};
+    copyGmToL1S(l1STensor, gmBlockS, layoutTileS, layoutTileS);
+    AscendC::SetFlag<AscendC::HardEvent::MTE2_FIX>(0);
+    AscendC::WaitFlag<AscendC::HardEvent::MTE2_FIX>(0);
+    copyL1ToFP(fixpipeBuf, l1STensor, layoutFpBuf, layoutTileS);
+}
+
+template <typename ElementA, typename ElementC, typename ElementAccumulator, int Rows, int Cols, typename CopyL0CToGm>
+CATLASS_DEVICE void StoreAccumulator(AscendC::GlobalTensor<ElementC> const &dst,
+                                     AscendC::LocalTensor<ElementAccumulator> const &src,
+                                     AscendC::LocalTensor<uint64_t> const &scale,
+                                     CopyL0CToGm &copyL0CToGm,
+                                     layout::RowMajor const &dstLayout,
+                                     layout::zN const &srcLayout,
+                                     uint8_t unitFlag = 0)
+{
+    if constexpr (std::is_same_v<ElementA, int8_t>) {
+        PtoStoreAccToGm<ElementC, ElementAccumulator, Rows, Cols>(dst, src, scale, dstLayout);
+    } else if constexpr (std::is_same_v<ElementA, half>) {
+        if (unitFlag == 0) {
+            copyL0CToGm(dst, src, dstLayout, srcLayout);
+        } else {
+            copyL0CToGm(dst, src, dstLayout, srcLayout, unitFlag);
+        }
+    }
+}
+
+}  // namespace detail
+
 
 template<AscendC::HardEvent event>
 __aicore__ inline void SyncFlagFunc(int32_t eventID)
@@ -457,7 +592,8 @@ private:
                             unitFlag = 0b10;
                         }
                     }
-                    tileMmad(l0CTile, l0ATile, l0BTile, mPartActual, nPartActual, kPartActual, initC, unitFlag);
+                    detail::PtoTileMmad<ElementAccumulator, ElementA, ElementB, L0TileShape>(
+                        l0CTile, l0ATile, l0BTile, mPartActual, nPartActual, kPartActual, initC, unitFlag);
 
                     AscendC::SetFlag<AscendC::HardEvent::M_MTE1>(l0BEventList[l0BListId]);
                     l0BListId = (l0BListId + 1 < L0B_STAGES) ? (l0BListId + 1) : 0;
@@ -470,34 +606,33 @@ private:
         if (params.isKLoopLast) {
             auto layoutCInGm = params.layoutCInGm;
             if constexpr (std::is_same_v<ElementA, int8_t>) {
-                auto layoutScale = params.layoutScale;
-                auto layoutTileS = layoutScale.GetTileLayout(MakeCoord(layoutCInGm.shape(1)));
                 AscendC::WaitFlag<AscendC::HardEvent::FIX_MTE2>(0);
-                copyGmToL1S(l1STensor, params.gmBlockS, layoutTileS, layoutTileS);
+                detail::StagePerChannelScale(
+                    copyGmToL1S,
+                    copyL1ToFP,
+                    l1STensor,
+                    fixpipeBuf,
+                    params.gmBlockS,
+                    params.layoutScale,
+                    layoutCInGm.shape(1));
                 AscendC::SetFlag<AscendC::HardEvent::MTE2_FIX>(0);
                 AscendC::WaitFlag<AscendC::HardEvent::MTE2_FIX>(0);
-
-                copyL1ToFP(fixpipeBuf, l1STensor, layoutTileS, layoutTileS);
-                AscendC::SetFlag<AscendC::HardEvent::FIX_MTE2>(0);
                 AscendC::PipeBarrier<PIPE_FIX>();
             }
             if constexpr (!ENABLE_UNIT_FLAG) {
                 AscendC::SetFlag<AscendC::HardEvent::M_FIX>(l0CEventList[l0CListId]);
                 AscendC::WaitFlag<AscendC::HardEvent::M_FIX>(l0CEventList[l0CListId]);
-                if constexpr (std::is_same_v<ElementA, int8_t>) {
-                    copyL0CToGm(params.gmBlockC, l0CTensor, l1STensor, layoutCInGm, layoutCInL0);
-                } else {
-                    copyL0CToGm(params.gmBlockC, l0CTensor, layoutCInGm, layoutCInL0);
-                }
+                detail::StoreAccumulator<ElementA, ElementC, ElementAccumulator, L1TileShape::M, L1TileShape::N>(
+                    params.gmBlockC, l0CTensor, fixpipeBuf, copyL0CToGm, layoutCInGm, layoutCInL0);
                 AscendC::SetFlag<AscendC::HardEvent::FIX_M>(l0CEventList[l0CListId]);
             } else {
-                if constexpr (std::is_same_v<ElementA, int8_t>) {
-                    copyL0CToGm(params.gmBlockC, l0CTensor, l1STensor, layoutCInGm, layoutCInL0, 0b11);
-                } else {
-                    copyL0CToGm(params.gmBlockC, l0CTensor, layoutCInGm, layoutCInL0, 0b11);
-                }
+                detail::StoreAccumulator<ElementA, ElementC, ElementAccumulator, L1TileShape::M, L1TileShape::N>(
+                    params.gmBlockC, l0CTensor, fixpipeBuf, copyL0CToGm, layoutCInGm, layoutCInL0, 0b11);
             }
             l0CListId = (l0CListId + 1 < L0C_STAGES) ? (l0CListId + 1) : 0;
+            if constexpr (std::is_same_v<ElementA, int8_t>) {
+                AscendC::SetFlag<AscendC::HardEvent::FIX_MTE2>(0);
+            }
             #ifdef __TILE_SYNC__
             if (params.flag > 0) {
                 int32_t flagId = params.flag + params.syncLoopIdx / 8;
