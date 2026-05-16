@@ -93,7 +93,7 @@ __aicore__ inline void MoeV2SortMultiCore::VBSCopyIn(int64_t progress, int64_t s
 
   LocalTensor<int32_t> rowIdxLocal = inLocal[sortNum];
   int64_t startValue = this->blockIdx * this->vbsTilingData->perCoreElements + inOffset;
-  SetWaitFlag<HardEvent::MTE3_S>(HardEvent::MTE3_S);
+  pto_detail::PtoSetWaitFlag<HardEvent::MTE3_S>(HardEvent::MTE3_S);
   ArithProgression<int32_t>(rowIdxLocal, startValue, 1, size);
   sortDataCopyInQueue.EnQue(inLocal);
 }
@@ -215,7 +215,7 @@ __aicore__ inline void MoeV2SortMultiCore::VBSProcess() {
       OneCoreVMSProcess(sortCoreLoops, sortCoreLoopElements, sortCoreLastLoopElements);
     }
   }
-  AscendC::SyncAll();
+  pto_detail::PtoSyncAll();
 }
 
 __aicore__ inline void MoeV2SortMultiCore::VMSProcess() {
@@ -250,7 +250,7 @@ __aicore__ inline void MoeV2SortMultiCore::VMSProcess() {
 
     lastListElements = perListElements * (remainListNum - 1) + lastListElements;
     perListElements = perListElements * MAX_MRGSORT_LIST;
-    AscendC::SyncAll();
+    pto_detail::PtoSyncAll();
   }
 }
 
@@ -265,7 +265,7 @@ __aicore__ inline void MoeV2SortMultiCore::SortOutProcess() {
     sorter.Init(&mrgsortParam, pipe);
     sorter.Process();
   }
-  AscendC::SyncAll();
+  pto_detail::PtoSyncAll();
 }
 
 template <typename TilingData>

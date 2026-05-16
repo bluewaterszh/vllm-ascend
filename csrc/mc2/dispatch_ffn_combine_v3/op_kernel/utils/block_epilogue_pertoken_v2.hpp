@@ -27,6 +27,24 @@ PTO_DEVICE PtoGlobalNd<Element> MakeContiguousGlobal(AscendC::GlobalTensor<Eleme
     return PtoGlobalNd<Element>(ptr, shape, stride);
 }
 
+template <auto Pipe>
+PTO_DEVICE void PtoPipeBarrier()
+{
+    AscendC::PipeBarrier<Pipe>();
+}
+
+template <AscendC::HardEvent Event>
+PTO_DEVICE void PtoSetFlag(int32_t eventId)
+{
+    AscendC::SetFlag<Event>(eventId);
+}
+
+template <AscendC::HardEvent Event>
+PTO_DEVICE void PtoWaitFlag(int32_t eventId)
+{
+    AscendC::WaitFlag<Event>(eventId);
+}
+
 template <typename Element, int TileElems = 128>
 PTO_DEVICE void PtoLoadVector(AscendC::LocalTensor<Element> const &dst,
                                   AscendC::GlobalTensor<Element> const &src,
@@ -58,6 +76,45 @@ PTO_DEVICE void PtoStoreVector(AscendC::GlobalTensor<Element> const &dst,
         PtoTile tile(1, cur);
         pto::TASSIGN(tile, reinterpret_cast<uint64_t>(srcChunk.GetPhyAddr()));
         pto::TSTORE(dstGlobal, tile);
+    }
+}
+
+template <typename DstElement, typename SrcElement, int TileElems = 128>
+PTO_DEVICE void PtoCastVector(AscendC::LocalTensor<DstElement> const &dst,
+                                  AscendC::LocalTensor<SrcElement> const &src,
+                                  uint32_t elemNum,
+                                  pto::RoundMode mode)
+{
+    using DstTile = pto::Tile<pto::TileType::Vec, DstElement, 1, TileElems, pto::BLayout::RowMajor, -1, -1>;
+    using SrcTile = pto::Tile<pto::TileType::Vec, SrcElement, 1, TileElems, pto::BLayout::RowMajor, -1, -1>;
+    for (uint32_t offset = 0; offset < elemNum; offset += TileElems) {
+        const uint32_t cur = (elemNum - offset > TileElems) ? TileElems : (elemNum - offset);
+        auto dstChunk = dst[offset];
+        auto srcChunk = src[offset];
+        DstTile dstTile(1, cur);
+        SrcTile srcTile(1, cur);
+        pto::TASSIGN(dstTile, reinterpret_cast<uint64_t>(dstChunk.GetPhyAddr()));
+        pto::TASSIGN(srcTile, reinterpret_cast<uint64_t>(srcChunk.GetPhyAddr()));
+        pto::TCVT(dstTile, srcTile, mode);
+    }
+}
+
+template <typename Element, int TileElems = 128>
+PTO_DEVICE void PtoMulVector(AscendC::LocalTensor<Element> const &dst,
+                                 AscendC::LocalTensor<Element> const &src,
+                                 uint32_t elemNum,
+                                 Element scalar)
+{
+    using PtoTile = pto::Tile<pto::TileType::Vec, Element, 1, TileElems, pto::BLayout::RowMajor, -1, -1>;
+    for (uint32_t offset = 0; offset < elemNum; offset += TileElems) {
+        const uint32_t cur = (elemNum - offset > TileElems) ? TileElems : (elemNum - offset);
+        auto dstChunk = dst[offset];
+        auto srcChunk = src[offset];
+        PtoTile dstTile(1, cur);
+        PtoTile srcTile(1, cur);
+        pto::TASSIGN(dstTile, reinterpret_cast<uint64_t>(dstChunk.GetPhyAddr()));
+        pto::TASSIGN(srcTile, reinterpret_cast<uint64_t>(srcChunk.GetPhyAddr()));
+        pto::TMULS(dstTile, srcTile, scalar);
     }
 }
 
@@ -164,27 +221,27 @@ public:
     PTO_DEVICE
     void SetFlag()
     {
-        AscendC::SetFlag<AscendC::HardEvent::V_MTE2>(EVENT_ID0);
-        AscendC::SetFlag<AscendC::HardEvent::V_MTE2>(EVENT_ID1);
-        AscendC::SetFlag<AscendC::HardEvent::V_MTE2>(EVENT_ID2);
-        AscendC::SetFlag<AscendC::HardEvent::V_MTE2>(EVENT_ID3);
-        AscendC::SetFlag<AscendC::HardEvent::S_MTE2>(EVENT_ID2);
-        AscendC::SetFlag<AscendC::HardEvent::S_MTE2>(EVENT_ID3);
-        AscendC::SetFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID0);
-        AscendC::SetFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID1);
+        detail::PtoSetFlag<AscendC::HardEvent::V_MTE2>(EVENT_ID0);
+        detail::PtoSetFlag<AscendC::HardEvent::V_MTE2>(EVENT_ID1);
+        detail::PtoSetFlag<AscendC::HardEvent::V_MTE2>(EVENT_ID2);
+        detail::PtoSetFlag<AscendC::HardEvent::V_MTE2>(EVENT_ID3);
+        detail::PtoSetFlag<AscendC::HardEvent::S_MTE2>(EVENT_ID2);
+        detail::PtoSetFlag<AscendC::HardEvent::S_MTE2>(EVENT_ID3);
+        detail::PtoSetFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID0);
+        detail::PtoSetFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID1);
     }
 
     PTO_DEVICE
     void Finalize()
     {
-        AscendC::WaitFlag<AscendC::HardEvent::V_MTE2>(EVENT_ID0);
-        AscendC::WaitFlag<AscendC::HardEvent::V_MTE2>(EVENT_ID1);
-        AscendC::WaitFlag<AscendC::HardEvent::V_MTE2>(EVENT_ID2);
-        AscendC::WaitFlag<AscendC::HardEvent::V_MTE2>(EVENT_ID3);
-        AscendC::WaitFlag<AscendC::HardEvent::S_MTE2>(EVENT_ID2);
-        AscendC::WaitFlag<AscendC::HardEvent::S_MTE2>(EVENT_ID3);
-        AscendC::WaitFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID0);
-        AscendC::WaitFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID1);
+        detail::PtoWaitFlag<AscendC::HardEvent::V_MTE2>(EVENT_ID0);
+        detail::PtoWaitFlag<AscendC::HardEvent::V_MTE2>(EVENT_ID1);
+        detail::PtoWaitFlag<AscendC::HardEvent::V_MTE2>(EVENT_ID2);
+        detail::PtoWaitFlag<AscendC::HardEvent::V_MTE2>(EVENT_ID3);
+        detail::PtoWaitFlag<AscendC::HardEvent::S_MTE2>(EVENT_ID2);
+        detail::PtoWaitFlag<AscendC::HardEvent::S_MTE2>(EVENT_ID3);
+        detail::PtoWaitFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID0);
+        detail::PtoWaitFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID1);
 
     }
     PTO_DEVICE
@@ -217,17 +274,19 @@ public:
         auto &ubCFp32 = ubFp32List[is_ping];
         auto &scaleUb = scaleUbList[is_ping];
 
-        AscendC::WaitFlag<AscendC::HardEvent::V_MTE2>(event_id);
+        detail::PtoWaitFlag<AscendC::HardEvent::V_MTE2>(event_id);
         detail::PtoLoadMatrixRows(ubC, gmTileC, actualM, actualN, n0, params.n2);
-        AscendC::SetFlag<AscendC::HardEvent::MTE2_V>(event_id);
+        detail::PtoSetFlag<AscendC::HardEvent::MTE2_V>(event_id);
 
-        AscendC::WaitFlag<AscendC::HardEvent::MTE2_V>(event_id);
-        AscendC::Cast<float, ElementC, false>(ubCFp32, ubC, AscendC::RoundMode::CAST_NONE, -1, repeat, {1, 1, 8, 4});
-        AscendC::SetFlag<AscendC::HardEvent::V_MTE2>(event_id);
+        detail::PtoWaitFlag<AscendC::HardEvent::MTE2_V>(event_id);
+        for (uint32_t row = 0; row < actualM; ++row) {
+                detail::PtoCastVector(ubCFp32[n0 * row], ubC[n0 * row], actualN, pto::RoundMode::CAST_NONE);
+        }
+        detail::PtoSetFlag<AscendC::HardEvent::V_MTE2>(event_id);
 
 
-        AscendC::WaitFlag<AscendC::HardEvent::V_MTE2>(event_id_2);
-        AscendC::WaitFlag<AscendC::HardEvent::S_MTE2>(event_id_2);
+        detail::PtoWaitFlag<AscendC::HardEvent::V_MTE2>(event_id_2);
+        detail::PtoWaitFlag<AscendC::HardEvent::S_MTE2>(event_id_2);
 
         int32_t gmScaleOffset = preSrcExpertSum + blockRow;
         if (source_scale_offset[event_id] != gmScaleOffset) {
@@ -235,26 +294,28 @@ public:
                 detail::PtoLoadVector(scaleUb, gmPerTokenScale[gmScaleOffset], actualM);
         }
 
-        AscendC::SetFlag<AscendC::HardEvent::MTE2_S>(event_id_2);
-        AscendC::SetFlag<AscendC::HardEvent::MTE2_V>(event_id_2);
+        detail::PtoSetFlag<AscendC::HardEvent::MTE2_S>(event_id_2);
+        detail::PtoSetFlag<AscendC::HardEvent::MTE2_V>(event_id_2);
 
         
 
         
-        AscendC::WaitFlag<AscendC::HardEvent::MTE2_V>(event_id_2);
-        AscendC::WaitFlag<AscendC::HardEvent::MTE2_S>(event_id_2); // Note that the value must be MTE2_S instead of MTE2_V.
+        detail::PtoWaitFlag<AscendC::HardEvent::MTE2_V>(event_id_2);
+        detail::PtoWaitFlag<AscendC::HardEvent::MTE2_S>(event_id_2); // Note that the value must be MTE2_S instead of MTE2_V.
                                                                    // Otherwise, 0 will be read, causing garbled characters.
-        AscendC::PipeBarrier<PIPE_V>();
+        detail::PtoPipeBarrier<PIPE_V>();
         for (uint32_t row = 0; row < actualM; ++row) {
                 float scale = scaleUb(row);
-                Muls<float, false>(ubCFp32[n0 * row], ubCFp32[n0 * row], scale, -1, (actualN + 127) / 128 * 2, {1, 1, 8, 8});
+                detail::PtoMulVector(ubCFp32[n0 * row], ubCFp32[n0 * row], actualN, scale);
         }
-        AscendC::PipeBarrier<PIPE_V>();
-        AscendC::WaitFlag<AscendC::HardEvent::MTE3_V>(event_id);
-        AscendC::Cast<ElementD, float, false>(ubD, ubCFp32, AscendC::RoundMode::CAST_RINT, -1, repeat, {1, 1, 4, 8});
-        AscendC::SetFlag<AscendC::HardEvent::S_MTE2>(event_id_2);
-        AscendC::SetFlag<AscendC::HardEvent::V_MTE2>(event_id_2);
-        AscendC::SetFlag<AscendC::HardEvent::V_MTE3>(event_id);
+        detail::PtoPipeBarrier<PIPE_V>();
+        detail::PtoWaitFlag<AscendC::HardEvent::MTE3_V>(event_id);
+        for (uint32_t row = 0; row < actualM; ++row) {
+                detail::PtoCastVector(ubD[n0 * row], ubCFp32[n0 * row], actualN, pto::RoundMode::CAST_RINT);
+        }
+        detail::PtoSetFlag<AscendC::HardEvent::S_MTE2>(event_id_2);
+        detail::PtoSetFlag<AscendC::HardEvent::V_MTE2>(event_id_2);
+        detail::PtoSetFlag<AscendC::HardEvent::V_MTE3>(event_id);
 
         int32_t lenTile = static_cast<int32_t>(actualM);
         int32_t stTile = blockRow;
@@ -262,7 +323,7 @@ public:
         int32_t preSumRankInExpert = 0;
         int32_t tileOffset = 0;
 
-        AscendC::WaitFlag<AscendC::HardEvent::V_MTE3>(event_id);
+        detail::PtoWaitFlag<AscendC::HardEvent::V_MTE3>(event_id);
         for (int32_t dstEpIdx = 0; dstEpIdx < params.EP; dstEpIdx ++) {
             int32_t lenRankInExpert = tokenPerExpert(tokenPerExpertLayout(dstEpIdx, params.rank, groupIdx));
             int32_t dstExpertOffset = preSumBeforeRank(dstEpIdx * params.expertPerRank + groupIdx);
@@ -316,12 +377,12 @@ public:
                     TputGlobal localRowG(localScratch, rowShape, localStride);
                     TputGlobal remoteRowG(remotePeerBase + rowIdx * params.n2, rowShape, remoteStride);
                     pto::comm::TPUT(remoteRowG, localRowG, tputTile);
-                    AscendC::PipeBarrier<PIPE_ALL>();
+                    detail::PtoPipeBarrier<PIPE_ALL>();
                 }
             }
             tileOffset += lenData;
         }
-        AscendC::SetFlag<AscendC::HardEvent::MTE3_V>(event_id);
+        detail::PtoSetFlag<AscendC::HardEvent::MTE3_V>(event_id);
 
     }
 private:

@@ -111,7 +111,7 @@ __aicore__ inline void MoeV2FullLoadQuantBase::SortCompute() {
   LocalTensor<int32_t> expandDstToSrcRowLocalInt32 = expandDstToSrcRowLocal.ReinterpretCast<int32_t>();
   LocalTensor<int32_t> rowSortScratchLocal = expertIdxLocal;
   ArithProgression<int32_t>(inLocal[this->sortNum], 0, 1, this->totalLength);
-  AscendC::PipeBarrier<PIPE_V>();
+  pto_detail::PtoPipeBarrier<PIPE_V>();
   pto_detail::PtoSortInt32AscendingUB(expandDstToSrcRowLocalInt32,
                                       rowIdxLocal,
                                       rowSortScratchLocal,
@@ -137,7 +137,7 @@ __aicore__ inline void MoeV2FullLoadQuantBase::ComputeExpertTokenCountOrCumsum()
 
   int64_t expertNumAlign = Align(this->expertNum, sizeof(int32_t));
   Duplicate(expertTokensCount, 0, expertNumAlign);
-  SetWaitFlag<HardEvent::V_S>(HardEvent::V_S);
+  pto_detail::PtoSetWaitFlag<HardEvent::V_S>(HardEvent::V_S);
 
   int32_t lastExpertId = expandedExpertIdx.GetValue(0);
   int64_t tokenCount = 0;

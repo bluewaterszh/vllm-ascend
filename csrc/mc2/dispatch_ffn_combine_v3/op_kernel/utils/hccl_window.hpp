@@ -40,6 +40,18 @@ FORCE_INLINE_AICORE void gm_dcci(__gm__ T *addr)
     __asm__ __volatile__("");
 }
 
+template <auto Pipe>
+FORCE_INLINE_AICORE void pto_pipe_barrier()
+{
+    AscendC::PipeBarrier<Pipe>();
+}
+
+template <bool NeedWait>
+FORCE_INLINE_AICORE void pto_sync_all()
+{
+    AscendC::SyncAll<NeedWait>();
+}
+
 class PtoRemoteWindow {
 public:
     FORCE_INLINE_AICORE PtoRemoteWindow() { segmentBytes_ = PTO_REMOTE_WINDOW_MEM; }
@@ -101,7 +113,7 @@ public:
 
     FORCE_INLINE_AICORE void NotifyRemoteTokenReady(int32_t rankId)
     {
-        AscendC::PipeBarrier<PIPE_ALL>();
+        pto_pipe_barrier<PIPE_ALL>();
         dsb(DSB_DDR);
         auto remoteTokenReady = RemoteTokenReadySignal(rankId, rank_);
         pto::comm::TNOTIFY(remoteTokenReady, 1, pto::comm::NotifyOp::AtomicAdd);
@@ -119,7 +131,7 @@ public:
         int count = gm_load(sync_base) + 1;
         int vec_id = AscendC::GetBlockIdx();
         int vec_size = AscendC::GetBlockNum() * AscendC::GetTaskRation();
-        AscendC::PipeBarrier<PIPE_ALL>();
+        pto_pipe_barrier<PIPE_ALL>();
         dsb(DSB_DDR);
         for (int i = vec_id; i < rankSize_; i += vec_size) {
             auto remoteBarrier = RemoteBarrierSignal(i, rank_);
@@ -128,7 +140,7 @@ public:
             pto::comm::TWAIT(localBarrier, count, pto::comm::WaitCmp::GE);
         }
 
-        AscendC::SyncAll<true>();
+        pto_sync_all<true>();
         gm_store(sync_base, count);
     }
 

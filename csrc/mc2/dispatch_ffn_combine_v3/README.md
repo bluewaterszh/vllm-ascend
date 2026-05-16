@@ -761,28 +761,30 @@ bash csrc/mc2/dispatch_ffn_combine_v3/run.sh \
 ```
 
 Observed results after the final closure checkpoint:
-- small case: kernel `34.88 us`, e2e `147.63 us`, `PASS`
-- large case: kernel `29.03 us`, e2e `118.69 us`, `PASS`
+- small case: kernel `29.00 us`, e2e `114.37 us`, `PASS`
+- large case: kernel `29.29 us`, e2e `116.56 us`, `PASS`
 
 Final residual classification:
 
 ### 1. boundary adapter
-- `op_kernel/moe_init_routing_quant_v2/moe_v2_src_to_dst_and_gather.h`: `DataCopyPad=2`, `PipeBarrier=13`, `SetWaitFlag=12`, `Duplicate=6`, `ReduceMax=2`, `SyncAll=1`
-- `op_kernel/moe_init_routing_quant_v2/moe_v2_expert_token_out.h`: `DataCopyPad=1`, `SetWaitFlag=11`, `Duplicate=5`, `SyncAll=5`
-- `op_kernel/moe_init_routing_quant_v2/moe_v2_fullload_quant.h`: `DataCopyPad=2`, `PipeBarrier=12`
-- `op_kernel/unpermute/moe_token_unpermute.h`: `DataCopyPad=2`, `PipeBarrier=9`, `Duplicate=1`
-- `op_kernel/dispatch_ffn_combine_kernel.hpp`: `DataCopyPad=4`, `PipeBarrier=4`, `Duplicate=2`, `SyncAll=12`
+- `op_kernel/moe_init_routing_quant_v2/moe_v2_src_to_dst_and_gather.h`: `DataCopyPad` only; vector/sync calls already go through PTO helper wrappers.
+- `op_kernel/moe_init_routing_quant_v2/moe_v2_expert_token_out.h`: `DataCopyPad` plus `SetAtomicAdd/SetAtomicNone` atomic writeback adapter.
+- `op_kernel/moe_init_routing_quant_v2/moe_v2_fullload_quant.h`: `DataCopyPad` hot-path tail adapter only.
+- `op_kernel/unpermute/moe_token_unpermute.h`: `DataCopyPad` / `DataCopyPadExtParams` tail adapter only.
+- `op_kernel/dispatch_ffn_combine_kernel.hpp`: `DataCopyPad` stride/pad adapter only.
 
-### 2. business layer with no direct GM-facing `DataCopy`
-- `op_kernel/moe_init_routing_quant_v2/moe_v2_sort_one_core.h`: `ArithProgression=1`, `SyncAll=1`
-- `op_kernel/moe_init_routing_quant_v2/moe_v2_src_to_dst_op.h`: `PipeBarrier=2`, `SetWaitFlag=2`, `SyncAll=4`
+### 2. kernel coordination shell
+- routing-chain direct `PipeBarrier/SetWaitFlag/SyncAll` has been collapsed into local PTO-style wrappers.
+- `op_kernel/dispatch_ffn_combine_kernel.hpp` still keeps `CrossCoreSetFlag/CrossCoreWaitFlag` and `SetL2CacheHint` as cross-core/cache coordination shell.
+- `op_kernel/utils/hccl_window.hpp` still keeps `DataCacheCleanAndInvalid` as the remote-window cache-coherence shell.
+- wrapper bodies in `moe_v2_pto_sort.h`, `dispatch_ffn_combine_kernel.hpp`, `block_epilogue_pertoken_{row,v2,swiglu}.hpp`, and `hccl_window.hpp` still use AscendC primitives underneath, but the business call sites no longer do.
 
 ### 3. substrate / host-shell residuals
-- `op_kernel/utils/block_mmad_preload_async_fixpipe_quant.hpp`: `DataCopy=2`, `PipeBarrier=4`, `Gemm::Tile::=2`
-- `op_kernel/utils/dispatch_policy_custom.hpp`: `DataCopy=6`, `Fixpipe=2`, `LoadData=1`, `Gemm::Tile::=11`, `Gemm::helper::=3`
-- `SetWaitFlag` / `SyncAll`: retained where they still express cross-pipe or cross-core host-shell synchronization semantics.
+- `op_kernel/utils/block_mmad_preload_async_fixpipe_quant.hpp`: `DataCopy`, `PipeBarrier`, `CrossCoreSetFlag`, and matmul event shell remain localized here.
+- `op_kernel/utils/dispatch_policy_custom.hpp`: `DataCopy`, `LoadData`, `LoadDataWithTranspose`, `Fixpipe`, `Gemm::Tile::*`, and `Gemm::helper::*` remain localized here.
+- common AscendC substrate (`kernel_operator.h`, `LocalTensor/GlobalTensor`, `TPipe/TQue/TBuf`, `__aicore__`, `GM_ADDR`) remains the base that PTO still runs on in this tree.
 
 Interpretation:
 - Stage 3b is complete from the migration/task-closure perspective: the remaining non-PTO interfaces are localized, justified, and no longer spread through the business compute bodies without explanation.
-- The next step is no longer function-first seam hunting; it is a dedicated performance pass over the hot vector/sync cluster and the matmul/fixpipe substrate.
+- The next step is no longer function-first seam hunting; it is a dedicated performance pass over the boundary adapters, the kernel coordination shell, and the matmul/fixpipe substrate.
 - Keep treating the numbers above as checkpoint records and optimization input, not as a reason to reopen the completed Stage 3b functionality migration.

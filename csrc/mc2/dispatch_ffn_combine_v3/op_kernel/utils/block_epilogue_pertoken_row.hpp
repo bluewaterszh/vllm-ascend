@@ -36,6 +36,24 @@ PTO_DEVICE PtoGlobalNd<Element> MakeContiguousGlobal(AscendC::GlobalTensor<Eleme
     return PtoGlobalNd<Element>(ptr, shape, stride);
 }
 
+template <auto Pipe>
+PTO_DEVICE void PtoPipeBarrier()
+{
+    AscendC::PipeBarrier<Pipe>();
+}
+
+template <AscendC::HardEvent Event>
+PTO_DEVICE void PtoSetFlag(int32_t eventId)
+{
+    AscendC::SetFlag<Event>(eventId);
+}
+
+template <AscendC::HardEvent Event>
+PTO_DEVICE void PtoWaitFlag(int32_t eventId)
+{
+    AscendC::WaitFlag<Event>(eventId);
+}
+
 template <typename Element, int TileElems = 1024>
 PTO_DEVICE void PtoLoadVector(AscendC::LocalTensor<Element> const &dst,
                                   AscendC::GlobalTensor<Element> const &src,
@@ -67,6 +85,45 @@ PTO_DEVICE void PtoStoreVector(AscendC::GlobalTensor<Element> const &dst,
         PtoTile tile(1, cur);
         pto::TASSIGN(tile, reinterpret_cast<uint64_t>(srcChunk.GetPhyAddr()));
         pto::TSTORE(dstGlobal, tile);
+    }
+}
+
+template <typename DstElement, typename SrcElement, int TileElems = 1024>
+PTO_DEVICE void PtoCastVector(AscendC::LocalTensor<DstElement> const &dst,
+                                  AscendC::LocalTensor<SrcElement> const &src,
+                                  uint32_t elemNum,
+                                  pto::RoundMode mode)
+{
+    using DstTile = pto::Tile<pto::TileType::Vec, DstElement, 1, TileElems, pto::BLayout::RowMajor, -1, -1>;
+    using SrcTile = pto::Tile<pto::TileType::Vec, SrcElement, 1, TileElems, pto::BLayout::RowMajor, -1, -1>;
+    for (uint32_t offset = 0; offset < elemNum; offset += TileElems) {
+        const uint32_t cur = (elemNum - offset > TileElems) ? TileElems : (elemNum - offset);
+        auto dstChunk = dst[offset];
+        auto srcChunk = src[offset];
+        DstTile dstTile(1, cur);
+        SrcTile srcTile(1, cur);
+        pto::TASSIGN(dstTile, reinterpret_cast<uint64_t>(dstChunk.GetPhyAddr()));
+        pto::TASSIGN(srcTile, reinterpret_cast<uint64_t>(srcChunk.GetPhyAddr()));
+        pto::TCVT(dstTile, srcTile, mode);
+    }
+}
+
+template <typename Element, int TileElems = 1024>
+PTO_DEVICE void PtoMulVector(AscendC::LocalTensor<Element> const &dst,
+                                 AscendC::LocalTensor<Element> const &src,
+                                 uint32_t elemNum,
+                                 Element scalar)
+{
+    using PtoTile = pto::Tile<pto::TileType::Vec, Element, 1, TileElems, pto::BLayout::RowMajor, -1, -1>;
+    for (uint32_t offset = 0; offset < elemNum; offset += TileElems) {
+        const uint32_t cur = (elemNum - offset > TileElems) ? TileElems : (elemNum - offset);
+        auto dstChunk = dst[offset];
+        auto srcChunk = src[offset];
+        PtoTile dstTile(1, cur);
+        PtoTile srcTile(1, cur);
+        pto::TASSIGN(dstTile, reinterpret_cast<uint64_t>(dstChunk.GetPhyAddr()));
+        pto::TASSIGN(srcTile, reinterpret_cast<uint64_t>(srcChunk.GetPhyAddr()));
+        pto::TMULS(dstTile, srcTile, scalar);
     }
 }
 
@@ -158,8 +215,8 @@ public:
     void SetFlag() 
     {
         for (uint32_t i = 0; i < UB_STAGES; ++i) {
-            AscendC::SetFlag<AscendC::HardEvent::V_MTE2>(eventUbCVMTE2List[i]);
-            AscendC::SetFlag<AscendC::HardEvent::MTE3_V>(eventUbDMTE3VList[i]);
+            row_detail::PtoSetFlag<AscendC::HardEvent::V_MTE2>(eventUbCVMTE2List[i]);
+            row_detail::PtoSetFlag<AscendC::HardEvent::MTE3_V>(eventUbDMTE3VList[i]);
         }
     }
     
@@ -167,8 +224,8 @@ public:
     void Finalize()
     {
         for (uint32_t i = 0; i < UB_STAGES; ++i) {
-            AscendC::WaitFlag<AscendC::HardEvent::V_MTE2>(eventUbCVMTE2List[i]);
-            AscendC::WaitFlag<AscendC::HardEvent::MTE3_V>(eventUbDMTE3VList[i]);
+            row_detail::PtoWaitFlag<AscendC::HardEvent::V_MTE2>(eventUbCVMTE2List[i]);
+            row_detail::PtoWaitFlag<AscendC::HardEvent::MTE3_V>(eventUbDMTE3VList[i]);
         }
     }
     PTO_DEVICE
@@ -214,27 +271,27 @@ public:
             auto &ubMul = ubMulList[ubListId];
             auto &ubD = ubDList[ubListId];
 
-            AscendC::WaitFlag<AscendC::HardEvent::V_MTE2>(eventUbCVMTE2List[ubListId]);
+            row_detail::PtoWaitFlag<AscendC::HardEvent::V_MTE2>(eventUbCVMTE2List[ubListId]);
             row_detail::PtoLoadVector(ubC, gmTileC, blockN);
-            AscendC::SetFlag<AscendC::HardEvent::MTE2_V>(eventUbCMTE2VList[ubListId]);
+            row_detail::PtoSetFlag<AscendC::HardEvent::MTE2_V>(eventUbCMTE2VList[ubListId]);
 
-            AscendC::WaitFlag<AscendC::HardEvent::MTE2_V>(eventUbCMTE2VList[ubListId]);
-            AscendC::Cast(ubCFp32, ubC, AscendC::RoundMode::CAST_NONE, blockN);
-            AscendC::SetFlag<AscendC::HardEvent::V_MTE2>(eventUbCVMTE2List[ubListId]);
+            row_detail::PtoWaitFlag<AscendC::HardEvent::MTE2_V>(eventUbCMTE2VList[ubListId]);
+            row_detail::PtoCastVector(ubCFp32, ubC, blockN, pto::RoundMode::CAST_NONE);
+            row_detail::PtoSetFlag<AscendC::HardEvent::V_MTE2>(eventUbCVMTE2List[ubListId]);
 
             ElementPerTokenScale perTokenScale = gmPerTokenScale(loopIdx);
 
-            AscendC::SetFlag<AscendC::HardEvent::S_V>(0);
-            AscendC::WaitFlag<AscendC::HardEvent::S_V>(0);
-            AscendC::PipeBarrier<PIPE_V>();
-            AscendC::Muls(ubCFp32, ubCFp32, perTokenScale, blockN);
-            AscendC::PipeBarrier<PIPE_V>();
+            row_detail::PtoSetFlag<AscendC::HardEvent::S_V>(0);
+            row_detail::PtoWaitFlag<AscendC::HardEvent::S_V>(0);
+            row_detail::PtoPipeBarrier<PIPE_V>();
+            row_detail::PtoMulVector(ubCFp32, ubCFp32, blockN, perTokenScale);
+            row_detail::PtoPipeBarrier<PIPE_V>();
 
-            AscendC::WaitFlag<AscendC::HardEvent::MTE3_V>(eventUbDMTE3VList[ubListId]);
-            AscendC::Cast(ubD, ubCFp32, AscendC::RoundMode::CAST_RINT, blockN);
-            AscendC::SetFlag<AscendC::HardEvent::V_MTE3>(eventUbDVMTE3List[ubListId]);
+            row_detail::PtoWaitFlag<AscendC::HardEvent::MTE3_V>(eventUbDMTE3VList[ubListId]);
+            row_detail::PtoCastVector(ubD, ubCFp32, blockN, pto::RoundMode::CAST_RINT);
+            row_detail::PtoSetFlag<AscendC::HardEvent::V_MTE3>(eventUbDVMTE3List[ubListId]);
 
-            AscendC::WaitFlag<AscendC::HardEvent::V_MTE3>(eventUbDVMTE3List[ubListId]);
+            row_detail::PtoWaitFlag<AscendC::HardEvent::V_MTE3>(eventUbDVMTE3List[ubListId]);
             __gm__ ElementD* dstRowBase = ptrD + loopIdx * blockN;
             if (dstRank == params.rank) {
                 AscendC::GlobalTensor<ElementD> gmTileD;
@@ -250,10 +307,10 @@ public:
                     TputGlobal localRowG(localScratch, rowShape, rowStride);
                     TputGlobal remoteRowG(dstRowBase + colOffset, rowShape, rowStride);
                     pto::comm::TPUT(remoteRowG, localRowG, tputTile);
-                    AscendC::PipeBarrier<PIPE_ALL>();
+                    row_detail::PtoPipeBarrier<PIPE_ALL>();
                 }
             }
-            AscendC::SetFlag<AscendC::HardEvent::MTE3_V>(eventUbDMTE3VList[ubListId]);
+            row_detail::PtoSetFlag<AscendC::HardEvent::MTE3_V>(eventUbDMTE3VList[ubListId]);
 
             ubListId = (ubListId + 1 < UB_STAGES) ? (ubListId + 1) : 0;
         }

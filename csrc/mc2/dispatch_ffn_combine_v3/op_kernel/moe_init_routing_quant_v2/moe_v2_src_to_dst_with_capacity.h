@@ -114,14 +114,14 @@ __aicore__ inline void MoeV2SrcToDstWithCapacity<T, TilingData>::CopyOut(int64_t
   LocalTensor<int32_t> outLocal = copyOutQueue.AllocTensor<int32_t>();
   int64_t length = Align(currentLoopRows, sizeof(int32_t));
 
-  SetWaitFlag<HardEvent::MTE2_S>(HardEvent::MTE2_S);
+  pto_detail::PtoSetWaitFlag<HardEvent::MTE2_S>(HardEvent::MTE2_S);
   if (this->lastExpertId == -1) {
     this->lastExpertId = this->lastCoreExpertId;
     this->tokenCount = this->lastCoreExpertIdNum;
   }
   for (int64_t idx = 0; idx < currentLoopRows; idx++) {
     int32_t expertIdx = inLocal[length].GetValue(idx);
-    SetWaitFlag<HardEvent::S_MTE3>(HardEvent::S_MTE3);
+    pto_detail::PtoSetWaitFlag<HardEvent::S_MTE3>(HardEvent::S_MTE3);
     int32_t index = 0;
     while (this->lastExpertId < expertIdx) {
       while (this->tokenCount < this->expertCapacity) {
@@ -132,7 +132,7 @@ __aicore__ inline void MoeV2SrcToDstWithCapacity<T, TilingData>::CopyOut(int64_t
             col = this->lastLoopCols;
           }
           pto_detail::PtoStoreVector(expandedXGm[index * this->cols + i * this->perLoopCols], this->outTmpLocal, col);
-          SetWaitFlag<HardEvent::MTE3_S>(HardEvent::MTE3_S);
+          pto_detail::PtoSetWaitFlag<HardEvent::MTE3_S>(HardEvent::MTE3_S);
         }
         this->tokenCount++;
       }
@@ -144,9 +144,9 @@ __aicore__ inline void MoeV2SrcToDstWithCapacity<T, TilingData>::CopyOut(int64_t
       int32_t outOffset = inLocal.GetValue(idx);
       index = expertIdx * this->expertCapacity + this->tokenCount;
       outLocal.SetValue(0, index);
-      SetWaitFlag<HardEvent::S_MTE3>(HardEvent::S_MTE3);
+      pto_detail::PtoSetWaitFlag<HardEvent::S_MTE3>(HardEvent::S_MTE3);
       pto_detail::PtoStoreVector(expandedRowIdxGm[outOffset], outLocal, 1);
-      SetWaitFlag<HardEvent::MTE3_S>(HardEvent::MTE3_S);
+      pto_detail::PtoSetWaitFlag<HardEvent::MTE3_S>(HardEvent::MTE3_S);
       this->tokenCount++;
     }
   }
@@ -169,7 +169,7 @@ __aicore__ inline void MoeV2SrcToDstWithCapacity<T, TilingData>::CopyOutRemain()
           col = this->lastLoopCols;
         }
         pto_detail::PtoStoreVector(expandedXGm[index * this->cols + i * this->perLoopCols], this->outTmpLocal, col);
-        SetWaitFlag<HardEvent::MTE3_S>(HardEvent::MTE3_S);
+        pto_detail::PtoSetWaitFlag<HardEvent::MTE3_S>(HardEvent::MTE3_S);
       }
       this->tokenCount++;
     }
@@ -184,7 +184,7 @@ __aicore__ inline void MoeV2SrcToDstWithCapacity<T, TilingData>::SyncAll() {
   if (coreNum == 1) {
     return;
   }
-  AscendC::SyncAll();
+  pto_detail::PtoSyncAll();
 }
 
 template <typename T, typename TilingData>

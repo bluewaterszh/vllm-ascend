@@ -81,7 +81,7 @@ __aicore__ inline void MoeV2GatherOut<T>::CopyInIndices(int64_t progress) {
 template <typename T>
 __aicore__ inline void MoeV2GatherOut<T>::CopyOut(int64_t progress) {
   LocalTensor<int32_t> indicesLocal = expandDstToSrcRowCopyInQueue.DeQue<int32_t>();
-  SetWaitFlag<HardEvent::MTE2_S>(HardEvent::MTE2_S);
+  pto_detail::PtoSetWaitFlag<HardEvent::MTE2_S>(HardEvent::MTE2_S);
   colsTileLength = this->perLoopCols;
   for (int64_t colsLoop = 0; colsLoop < this->colLoops; colsLoop++) {
     int64_t initialRow = this->gatherOutTilingData->perCoreRows * this->blockIdx + this->perLoopRows * progress;
@@ -96,7 +96,7 @@ __aicore__ inline void MoeV2GatherOut<T>::CopyOut(int64_t progress) {
       // input row position
       inputOffset = row * this->cols + colsLoop * this->perLoopCols;
       pto_detail::PtoLoadVector(inLocal, inputXGm[inputOffset], this->colsTileLength);
-      SetWaitFlag<HardEvent::MTE2_MTE3>(HardEvent::MTE2_MTE3);
+      pto_detail::PtoSetWaitFlag<HardEvent::MTE2_MTE3>(HardEvent::MTE2_MTE3);
 
       while (curLoopRow < this->currentLoopRows && initialRow / this->k == row) {
         int32_t outIndex = indicesLocal.GetValue(curLoopRow);

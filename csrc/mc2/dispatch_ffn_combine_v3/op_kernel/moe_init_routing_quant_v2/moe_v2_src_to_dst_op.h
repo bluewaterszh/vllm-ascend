@@ -62,8 +62,9 @@ __aicore__ inline void MoeV2SrcToDstOp::AssistInit() {
 #endif
   LocalTensor<int32_t> assistTensor = assistBuffer.Get<int32_t>(ASSIST_NUM);
   pto_detail::PtoLoadVector(assistTensor, assistGm, ASSIST_NUM);
-  SetWaitFlag<HardEvent::MTE2_V>(HardEvent::MTE2_V);
-  Adds(assistTensor, assistTensor, (int32_t)(this->blockIdx * this->srcToDstTilingData->perCoreRows), ASSIST_NUM);
+  pto_detail::PtoSetWaitFlag<HardEvent::MTE2_V>(HardEvent::MTE2_V);
+  pto_detail::PtoAddScalarVector(assistTensor, assistTensor, ASSIST_NUM,
+                                 static_cast<int32_t>(this->blockIdx * this->srcToDstTilingData->perCoreRows));
 }
 
 __aicore__ inline void MoeV2SrcToDstOp::CopyIn(int64_t progress) {
@@ -76,20 +77,20 @@ __aicore__ inline void MoeV2SrcToDstOp::Compute(int64_t progress) {
   LocalTensor<int32_t> outLocal = copyOutQueue.AllocTensor<int32_t>();
   LocalTensor<int32_t> assistTensor = assistBuffer.Get<int32_t>(ASSIST_NUM);
 
-  AscendC::PipeBarrier<PIPE_V>();
+  pto_detail::PtoPipeBarrier<PIPE_V>();
   int64_t loops = Ceil(currentLoopRows, ASSIST_INDEX_NUM);
   for (int64_t i = 0; i < loops; i++) {
-    Adds(outLocal[i * ASSIST_NUM], assistTensor,
-         static_cast<int32_t>(this->perLoopRows * progress + i * ASSIST_INDEX_NUM), ASSIST_NUM);
+    pto_detail::PtoAddScalarVector(outLocal[i * ASSIST_NUM], assistTensor, ASSIST_NUM,
+                                   static_cast<int32_t>(this->perLoopRows * progress + i * ASSIST_INDEX_NUM));
   }
-  AscendC::PipeBarrier<PIPE_V>();
+  pto_detail::PtoPipeBarrier<PIPE_V>();
   copyOutQueue.EnQue<int32_t>(outLocal);
 }
 
 __aicore__ inline void MoeV2SrcToDstOp::CopyOut() {
   LocalTensor<int32_t> inLocal = copyInQueue.DeQue<int32_t>();
   LocalTensor<int32_t> outLocal = copyOutQueue.DeQue<int32_t>();
-  SetWaitFlag<HardEvent::MTE2_S>(HardEvent::MTE2_S);
+  pto_detail::PtoSetWaitFlag<HardEvent::MTE2_S>(HardEvent::MTE2_S);
   uint32_t outOffset;
   for (int64_t idx = 0; idx < currentLoopRows; idx++) {
     outOffset = inLocal.GetValue(idx);
@@ -104,7 +105,7 @@ __aicore__ inline void MoeV2SrcToDstOp::SyncAll() {
   if (coreNum == 1) {
     return;
   }
-  AscendC::SyncAll();
+  pto_detail::PtoSyncAll();
 }
 
 template <typename TilingData>

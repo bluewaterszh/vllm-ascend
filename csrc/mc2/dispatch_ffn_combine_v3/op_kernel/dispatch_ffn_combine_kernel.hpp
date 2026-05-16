@@ -54,6 +54,30 @@ PTO_DEVICE PtoGlobalNd<Element> MakeContiguousGlobal(AscendC::GlobalTensor<Eleme
     return PtoGlobalNd<Element>(ptr, shape, stride);
 }
 
+template <auto Pipe>
+PTO_DEVICE void PtoPipeBarrier()
+{
+    AscendC::PipeBarrier<Pipe>();
+}
+
+template <AscendC::HardEvent Event>
+PTO_DEVICE void PtoSetFlag(int32_t eventId)
+{
+    AscendC::SetFlag<Event>(eventId);
+}
+
+template <AscendC::HardEvent Event>
+PTO_DEVICE void PtoWaitFlag(int32_t eventId)
+{
+    AscendC::WaitFlag<Event>(eventId);
+}
+
+template <bool NeedWait>
+PTO_DEVICE void PtoSyncAll()
+{
+    AscendC::SyncAll<NeedWait>();
+}
+
 template <typename Element, int TileElems = 1024>
 PTO_DEVICE void PtoLoadVector(AscendC::LocalTensor<Element> const &dst,
                                   AscendC::GlobalTensor<Element> const &src,
@@ -85,6 +109,47 @@ PTO_DEVICE void PtoStoreVector(AscendC::GlobalTensor<Element> const &dst,
         PtoTile tile(1, cur);
         pto::TASSIGN(tile, reinterpret_cast<uint64_t>(srcChunk.GetPhyAddr()));
         pto::TSTORE(dstGlobal, tile);
+    }
+}
+
+template <typename Element, int TileElems = 1024>
+PTO_DEVICE void PtoAddVector(AscendC::LocalTensor<Element> const &dst,
+                                 AscendC::LocalTensor<Element> const &src0,
+                                 AscendC::LocalTensor<Element> const &src1,
+                                 uint32_t elemNum)
+{
+    using PtoTile = pto::Tile<pto::TileType::Vec, Element, 1, TileElems, pto::BLayout::RowMajor, -1, -1>;
+    for (uint32_t offset = 0; offset < elemNum; offset += TileElems) {
+        const uint32_t cur = (elemNum - offset > TileElems) ? TileElems : (elemNum - offset);
+        auto dstChunk = dst[offset];
+        auto src0Chunk = src0[offset];
+        auto src1Chunk = src1[offset];
+        PtoTile dstTile(1, cur);
+        PtoTile src0Tile(1, cur);
+        PtoTile src1Tile(1, cur);
+        pto::TASSIGN(dstTile, reinterpret_cast<uint64_t>(dstChunk.GetPhyAddr()));
+        pto::TASSIGN(src0Tile, reinterpret_cast<uint64_t>(src0Chunk.GetPhyAddr()));
+        pto::TASSIGN(src1Tile, reinterpret_cast<uint64_t>(src1Chunk.GetPhyAddr()));
+        pto::TADD(dstTile, src0Tile, src1Tile);
+    }
+}
+
+template <typename Element, int TileElems = 1024>
+PTO_DEVICE void PtoAddScalarVector(AscendC::LocalTensor<Element> const &dst,
+                                       AscendC::LocalTensor<Element> const &src,
+                                       uint32_t elemNum,
+                                       Element scalar)
+{
+    using PtoTile = pto::Tile<pto::TileType::Vec, Element, 1, TileElems, pto::BLayout::RowMajor, -1, -1>;
+    for (uint32_t offset = 0; offset < elemNum; offset += TileElems) {
+        const uint32_t cur = (elemNum - offset > TileElems) ? TileElems : (elemNum - offset);
+        auto dstChunk = dst[offset];
+        auto srcChunk = src[offset];
+        PtoTile dstTile(1, cur);
+        PtoTile srcTile(1, cur);
+        pto::TASSIGN(dstTile, reinterpret_cast<uint64_t>(dstChunk.GetPhyAddr()));
+        pto::TASSIGN(srcTile, reinterpret_cast<uint64_t>(srcChunk.GetPhyAddr()));
+        pto::TADDS(dstTile, srcTile, scalar);
     }
 }
 
@@ -292,8 +357,8 @@ private:
         int32_t ubMoveNum
     )
     {
-        AscendC::SetFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID0);
-        AscendC::SetFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID1);
+        kernel_detail::PtoSetFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID0);
+        kernel_detail::PtoSetFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID1);
 
         constexpr int32_t BufferNum = 2;
         int tmpBufferSize = 32 * 1024 / sizeof(T);   // 32 KB
@@ -315,21 +380,21 @@ private:
             auto inputOffset = processOffset;
             auto outputOffset = processOffset;
             // [ReduceScatter] 2. Pre Interface Sync
-            AscendC::WaitFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID);
+            kernel_detail::PtoWaitFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID);
             // [ReduceScatter] 3. Start shmem_mte_get_mem_nbi
             kernel_detail::PtoLoadVector(buf, src[inputOffset], curProcessNum);
-            AscendC::SetFlag<AscendC::HardEvent::MTE2_MTE3>(EVENT_ID);
-            AscendC::WaitFlag<AscendC::HardEvent::MTE2_MTE3>(EVENT_ID);
+            kernel_detail::PtoSetFlag<AscendC::HardEvent::MTE2_MTE3>(EVENT_ID);
+            kernel_detail::PtoWaitFlag<AscendC::HardEvent::MTE2_MTE3>(EVENT_ID);
             kernel_detail::PtoStoreVector(dst[outputOffset], buf, curProcessNum);
 
             // [ReduceScatter] 4. Post Interface Sync
-            AscendC::SetFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID);
+            kernel_detail::PtoSetFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID);
             pingpongId = (pingpongId + 1) % BufferNum;
         }
         // [ReduceScatter] 4. Post Interface Sync
 
-        AscendC::WaitFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID0);
-        AscendC::WaitFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID1);
+        kernel_detail::PtoWaitFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID0);
+        kernel_detail::PtoWaitFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID1);
     }
 
     template<typename T>
@@ -424,14 +489,14 @@ private:
             PackedGlobal remotePackedG(src + inputOffset, packedShape, packedStride);
             PackedTile packedTile(1, copyInNum < packedTileCols ? copyInNum : packedTileCols);
             pto::comm::TGET(localPackedG, remotePackedG, packedTile);
-            AscendC::PipeBarrier<PIPE_ALL>();
+            kernel_detail::PtoPipeBarrier<PIPE_ALL>();
 
-            AscendC::WaitFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID);
+            kernel_detail::PtoWaitFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID);
             int64_t dataLen = rowNum * copyInNum;
             LoadPackedScratchToUb(buf, localPackedScratchGm, dataLen);
 
-            AscendC::SetFlag<AscendC::HardEvent::MTE2_MTE3>(EVENT_ID);
-            AscendC::WaitFlag<AscendC::HardEvent::MTE2_MTE3>(EVENT_ID);
+            kernel_detail::PtoSetFlag<AscendC::HardEvent::MTE2_MTE3>(EVENT_ID);
+            kernel_detail::PtoWaitFlag<AscendC::HardEvent::MTE2_MTE3>(EVENT_ID);
             auto outputOffset = processIndex * ubMoveNum * hiddenSize;
             StorePerTokenRows(dst, buf, outputOffset, static_cast<uint16_t>(rowNum), static_cast<uint16_t>(hiddenSize));
             StorePerTokenScales(dstScale,
@@ -439,7 +504,7 @@ private:
                                processIndex * ubMoveNum,
                                static_cast<uint16_t>(rowNum),
                                static_cast<uint16_t>(hiddenSize));
-            AscendC::SetFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID);
+            kernel_detail::PtoSetFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID);
         }
     }
     
@@ -469,8 +534,8 @@ private:
 
         kernel_detail::PtoLoadVector(tmpExpertIdx[0], expertIdxGm[startIdx], copySize);
 
-        AscendC::SetFlag<AscendC::HardEvent::MTE2_S>(EVENT_ID0);
-        AscendC::WaitFlag<AscendC::HardEvent::MTE2_S>(EVENT_ID0);
+        kernel_detail::PtoSetFlag<AscendC::HardEvent::MTE2_S>(EVENT_ID0);
+        kernel_detail::PtoWaitFlag<AscendC::HardEvent::MTE2_S>(EVENT_ID0);
 
         for (int32_t i = 0; i < copySize; ++i) {
             int32_t tokenIdx = (startIdx + i) / topK;
@@ -480,10 +545,10 @@ private:
             }
         }
 
-        AscendC::SetFlag<AscendC::HardEvent::S_MTE3>(EVENT_ID0);
-        AscendC::WaitFlag<AscendC::HardEvent::S_MTE3>(EVENT_ID0);
+        kernel_detail::PtoSetFlag<AscendC::HardEvent::S_MTE3>(EVENT_ID0);
+        kernel_detail::PtoWaitFlag<AscendC::HardEvent::S_MTE3>(EVENT_ID0);
         kernel_detail::PtoStoreVector(expertIdxGm[startIdx], tmpExpertIdx[0], copySize);
-        AscendC::SyncAll<true>();
+        kernel_detail::PtoSyncAll<true>();
     }
 
     PTO_DEVICE
@@ -499,16 +564,19 @@ private:
                                static_cast<uint16_t>(expertPerRank * sizeof(int32_t)),
                                static_cast<uint16_t>((paddedExpertNumAligned - expertPerRank) * sizeof(int32_t)));
 
-        AscendC::SetFlag<AscendC::HardEvent::MTE2_V>(EVENT_ID0);
-        AscendC::WaitFlag<AscendC::HardEvent::MTE2_V>(EVENT_ID0);
+        kernel_detail::PtoSetFlag<AscendC::HardEvent::MTE2_V>(EVENT_ID0);
+        kernel_detail::PtoWaitFlag<AscendC::HardEvent::MTE2_V>(EVENT_ID0);
 
         for (uint32_t i = 1; i < EP; ++i) {
-            AscendC::Add(tmpBuffer1[i * expertPerRankAligned], tmpBuffer1[i * expertPerRankAligned], tmpBuffer1[(i - 1) * expertPerRankAligned], expertPerRank);
-            AscendC::PipeBarrier<PIPE_V>();
+            kernel_detail::PtoAddVector(tmpBuffer1[i * expertPerRankAligned],
+                                        tmpBuffer1[i * expertPerRankAligned],
+                                        tmpBuffer1[(i - 1) * expertPerRankAligned],
+                                        expertPerRank);
+            kernel_detail::PtoPipeBarrier<PIPE_V>();
         }
 
-        AscendC::SetFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID0);
-        AscendC::WaitFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID0);
+        kernel_detail::PtoSetFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID0);
+        kernel_detail::PtoWaitFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID0);
 
         StoreExpertCountsPadded(result,
                                 tmpBuffer1,
@@ -728,11 +796,11 @@ private:
     PTO_DEVICE 
     void InitArithProgress(Params const &params) {
         AscendC::LocalTensor<float> tmpBuffer1 = resource.ubBuf.template GetBufferByByte<float>(0);
-        AscendC::SetFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID0);
-        AscendC::WaitFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID0);
+        kernel_detail::PtoSetFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID0);
+        kernel_detail::PtoWaitFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID0);
         AscendC::Duplicate(tmpBuffer1, 0.0f, (params.EP + 1) * FLAGSTRIDE);
-        AscendC::SetFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID0);
-        AscendC::WaitFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID0);
+        kernel_detail::PtoSetFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID0);
+        kernel_detail::PtoWaitFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID0);
 
         AscendC::GlobalTensor<float> flagGlobalBase;
         flagGlobalBase.SetGlobalBuffer(workspaceInfo.ptrSoftFlagBase);
@@ -747,7 +815,7 @@ private:
         AscendC::LocalTensor<int32_t> prevSumBuf = tmpBuffer[numPerCore];
 
         remoteWindow.ResetLocalTokenReady();
-        AscendC::SyncAll<true>();
+        kernel_detail::PtoSyncAll<true>();
         remoteWindow.CrossRankSync();
 
         for(int32_t dstEpIdx = coreIdx; dstEpIdx < params.EP; dstEpIdx += coreNum) {
@@ -760,7 +828,7 @@ private:
             __gm__ void* dstPeermemPtr = remoteWindow(localTokenPerExpertOffset, dstEpIdx);
             dstAddress.SetGlobalBuffer((__gm__ int32_t * )dstPeermemPtr);
 
-            AscendC::SetFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID0);
+            kernel_detail::PtoSetFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID0);
             using ShapeDyn = pto::Shape<pto::DYNAMIC, pto::DYNAMIC, pto::DYNAMIC, pto::DYNAMIC, pto::DYNAMIC>;
             using StrideDyn = pto::Stride<pto::DYNAMIC, pto::DYNAMIC, pto::DYNAMIC, pto::DYNAMIC, pto::DYNAMIC>;
             using TputGlobal = pto::GlobalTensor<int32_t, ShapeDyn, StrideDyn, pto::Layout::ND>;
@@ -773,40 +841,40 @@ private:
             StrideDyn tputStride(numPerCore, numPerCore, numPerCore, numPerCore, 1);
             TputTile tputTile(1, numPerCore);
 
-            AscendC::WaitFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID0);
+            kernel_detail::PtoWaitFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID0);
 
             kernel_detail::PtoLoadVector(tmpBuffer, srcAddress[0], numPerCore);
 
-            AscendC::SetFlag<AscendC::HardEvent::MTE2_V>(EVENT_ID0);
-            AscendC::WaitFlag<AscendC::HardEvent::MTE2_V>(EVENT_ID0);
-            AscendC::Adds(tmpBuffer, tmpBuffer, 0x800000, numPerCore);
-            AscendC::SetFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID0);
-            AscendC::WaitFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID0);
+            kernel_detail::PtoSetFlag<AscendC::HardEvent::MTE2_V>(EVENT_ID0);
+            kernel_detail::PtoWaitFlag<AscendC::HardEvent::MTE2_V>(EVENT_ID0);
+            kernel_detail::PtoAddScalarVector(tmpBuffer, tmpBuffer, numPerCore, static_cast<int32_t>(0x800000));
+            kernel_detail::PtoSetFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID0);
+            kernel_detail::PtoWaitFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID0);
             kernel_detail::PtoStoreVector(localScratchGm[0], tmpBuffer, numPerCore);
             TputGlobal localPackedG(localScratch, tputShape, tputStride);
             TputGlobal remotePackedG(reinterpret_cast<__gm__ int32_t*>(dstPeermemPtr), tputShape, tputStride);
             pto::comm::TPUT(remotePackedG, localPackedG, tputTile);
-            AscendC::SetFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID0);
-            AscendC::WaitFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID0);
+            kernel_detail::PtoSetFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID0);
+            kernel_detail::PtoWaitFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID0);
             remoteWindow.NotifyRemoteTokenReady(dstEpIdx);
         }
         for(int32_t dstEpIdx = coreIdx; dstEpIdx < params.EP; dstEpIdx += coreNum) {
             if (dstEpIdx != params.rank) {
                 remoteWindow.WaitTokenReady(dstEpIdx);
                 kernel_detail::PtoLoadVector(tmpBuffer, tokenPerExpert[tokenPerExpertLayout(dstEpIdx, 0, 0)], numPerCore);
-                AscendC::SetFlag<AscendC::HardEvent::MTE2_V>(EVENT_ID0);
-                AscendC::WaitFlag<AscendC::HardEvent::MTE2_V>(EVENT_ID0);
-                AscendC::Adds(tmpBuffer, tmpBuffer, -0x800000, numPerCore);
-                AscendC::PipeBarrier<PIPE_V>();
-                AscendC::SetFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID0);
-                AscendC::WaitFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID0);
+                kernel_detail::PtoSetFlag<AscendC::HardEvent::MTE2_V>(EVENT_ID0);
+                kernel_detail::PtoWaitFlag<AscendC::HardEvent::MTE2_V>(EVENT_ID0);
+                kernel_detail::PtoAddScalarVector(tmpBuffer, tmpBuffer, numPerCore, static_cast<int32_t>(-0x800000));
+                kernel_detail::PtoPipeBarrier<PIPE_V>();
+                kernel_detail::PtoSetFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID0);
+                kernel_detail::PtoWaitFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID0);
                 kernel_detail::PtoStoreVector(tokenPerExpert[tokenPerExpertLayout(dstEpIdx, 0, 0)], tmpBuffer, numPerCore);
             } else {
                 kernel_detail::PtoLoadVector(tmpBuffer, tokenPerExpert[tokenPerExpertLayout(dstEpIdx, 0, 0)], numPerCore);
-                AscendC::SetFlag<AscendC::HardEvent::MTE2_V>(EVENT_ID0);
-                AscendC::WaitFlag<AscendC::HardEvent::MTE2_V>(EVENT_ID0);
+                kernel_detail::PtoSetFlag<AscendC::HardEvent::MTE2_V>(EVENT_ID0);
+                kernel_detail::PtoWaitFlag<AscendC::HardEvent::MTE2_V>(EVENT_ID0);
             }
-            AscendC::PipeBarrier<PIPE_ALL>();
+            kernel_detail::PtoPipeBarrier<PIPE_ALL>();
             int32_t prevSum = 0;
             int32_t j = 0;
             for (int32_t i = 0; i < (params.rank + 1) * params.expertPerRank; i++) {
@@ -816,13 +884,13 @@ private:
                 }
                 prevSum += tmpBuffer(i);
             }
-            AscendC::SetFlag<AscendC::HardEvent::S_MTE3>(EVENT_ID0);
-            AscendC::WaitFlag<AscendC::HardEvent::S_MTE3>(EVENT_ID0);
+            kernel_detail::PtoSetFlag<AscendC::HardEvent::S_MTE3>(EVENT_ID0);
+            kernel_detail::PtoWaitFlag<AscendC::HardEvent::S_MTE3>(EVENT_ID0);
             kernel_detail::PtoStoreVector(preSumBeforeRank[dstEpIdx * params.expertPerRank], prevSumBuf,
                                           params.expertPerRank);
         }
 
-        AscendC::SyncAll<true>();
+        kernel_detail::PtoSyncAll<true>();
     }
 
     PTO_DEVICE
@@ -831,12 +899,12 @@ private:
         if (coreIdx != coreNum - 1) {
             return;
         }
-        AscendC::SetFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID0);
-        AscendC::WaitFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID0);
+        kernel_detail::PtoSetFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID0);
+        kernel_detail::PtoWaitFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID0);
         AscendC::LocalTensor<int32_t> tmp = resource.ubBuf.template GetBufferByByte<int32_t>(0);
         AscendC::Duplicate(tmp, 0, num);
-        AscendC::SetFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID0);
-        AscendC::WaitFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID0);
+        kernel_detail::PtoSetFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID0);
+        kernel_detail::PtoWaitFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID0);
         kernel_detail::PtoStoreVector(tokenPerExpert, tmp, num);
     }
 
@@ -861,18 +929,18 @@ private:
                 mask[0] |= 1ull * (1ull << (i * 16));
             }
         }
-        AscendC::SetFlag<AscendC::HardEvent::S_V>(EVENT_ID0);
-        AscendC::WaitFlag<AscendC::HardEvent::S_V>(EVENT_ID0);
+        kernel_detail::PtoSetFlag<AscendC::HardEvent::S_V>(EVENT_ID0);
+        kernel_detail::PtoWaitFlag<AscendC::HardEvent::S_V>(EVENT_ID0);
         while (flag < flagBase) {
             flag = flagBase;
             kernel_detail::PtoLoadVector(tmpBuffer1, flagGM, params.EP * FLAGSTRIDE);
-            AscendC::SetFlag<AscendC::HardEvent::MTE2_V>(EVENT_ID0);
-            AscendC::WaitFlag<AscendC::HardEvent::MTE2_V>(EVENT_ID0);
+            kernel_detail::PtoSetFlag<AscendC::HardEvent::MTE2_V>(EVENT_ID0);
+            kernel_detail::PtoWaitFlag<AscendC::HardEvent::MTE2_V>(EVENT_ID0);
 
             AscendC::ReduceMin<float>(dstValueBuffer, tmpBuffer1, sharedTmpBuffer, mask, repeatNum, 8, false);
 
-            AscendC::SetFlag<AscendC::HardEvent::V_S>(EVENT_ID0);
-            AscendC::WaitFlag<AscendC::HardEvent::V_S>(EVENT_ID0);
+            kernel_detail::PtoSetFlag<AscendC::HardEvent::V_S>(EVENT_ID0);
+            kernel_detail::PtoWaitFlag<AscendC::HardEvent::V_S>(EVENT_ID0);
             flag = min(flag, dstValueBuffer.GetValue(0));
 
             if (flag > lastflag) {
@@ -901,7 +969,7 @@ private:
         params.ptrWorkspace + expandedRowIdxOffset, 
         &params.moeInitRoutingQuantV2TilingData, params.initRoutingQuantTilingKey);
 
-        AscendC::SyncAll<true>();
+        kernel_detail::PtoSyncAll<true>();
 
         CrossRankSyncAndlocalTokenPerExpertAllGatherAndGetSumPreRankV2(params, localTokenPerExpertOffset);
 
@@ -915,7 +983,7 @@ private:
         if (coreIdx < params.EP) {
             prevSum = preSumBeforeRank(coreIdx * params.expertPerRank);
         }
-        AscendC::SyncAll<true>();
+        kernel_detail::PtoSyncAll<true>();
         
         AscendC::GlobalTensor<int32_t> ExpertTokenNums;
         ExpertTokenNums.SetGlobalBuffer(reinterpret_cast<__gm__ int32_t*>(params.ptrExpertTokenNums));
@@ -931,8 +999,8 @@ private:
         uint32_t dequantSum = 0;
 
         icache_preload(8);
-        AscendC::SetFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID0);
-        AscendC::SetFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID1);
+        kernel_detail::PtoSetFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID0);
+        kernel_detail::PtoSetFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID1);
         int32_t pingpongIdx = 0;
         for (int32_t groupIdx = 0; groupIdx < params.expertPerRank; ++groupIdx) {
             // The ith core reads data from the ith rank's peermem
@@ -956,7 +1024,7 @@ private:
                 }
 
             }
-            AscendC::SyncAll<true>();
+            kernel_detail::PtoSyncAll<true>();
             AscendC::CrossCoreSetFlag<0x2, PIPE_MTE3>(syncgmm1Idx / CROSS_CORE_FLAG_MAX_SET_COUNT);
             syncgmm1Idx ++;
 
@@ -980,8 +1048,8 @@ private:
                 }
             }
         }
-        AscendC::WaitFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID0);
-        AscendC::WaitFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID1);
+        kernel_detail::PtoWaitFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID0);
+        kernel_detail::PtoWaitFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID1);
 
         uint32_t n2 = GetPtoShapeK(params.problemShape);
 
@@ -1017,7 +1085,7 @@ private:
 
         // Synchronous wait: SwiGLU waits for GMM1 [1]
         AscendC::CrossCoreWaitFlag<0x2>(SYNCFLAGC2V);
-        AscendC::SyncAll<true>();
+        kernel_detail::PtoSyncAll<true>();
         if (dequantSum1 > 0) { 
             uint32_t rowStartThisCore = 0;
             auto offsetC = MakePtoCoord2D(0U, 0);
@@ -1027,14 +1095,14 @@ private:
             int64_t gmOffsetD = params.layoutD1.GetOffset(offsetC);
             blockEpilogue1(gmC[gmOffsetC], shapeC, gmPerTokenScale1[rowStartThisCore], gmPermutedToken[gmOffsetD], gmPerTokenScale2[rowStartThisCore], params.epilogueCoreNum);
         }
-        AscendC::SyncAll<true>();
+        kernel_detail::PtoSyncAll<true>();
         // Synchronization signal: SwiGLU notifies GMM2 [1]
         AscendC::CrossCoreSetFlag<0x2, PIPE_MTE3>(SYNCFLAGV2C);
         
         if ((params.epilogueGranularity < params.expertPerRank && params.epilogueGranularity > 0)) {
             // Synchronous wait: SwiGLU waits for GMM1 [2]
             AscendC::CrossCoreWaitFlag<0x2>(SYNCFLAGC2V);
-            AscendC::SyncAll<true>();
+            kernel_detail::PtoSyncAll<true>();
             if (dequantSum2 > 0) {
                 uint32_t rowStartThisCore = dequantSum1;
                 auto offsetC = MakePtoCoord2D(rowStartThisCore, 0);
@@ -1045,7 +1113,7 @@ private:
                 int64_t gmOffsetD = params.layoutD1.GetOffset(offsetC);
                 blockEpilogue1(gmC[gmOffsetC], shapeC, gmPerTokenScale1[rowStartThisCore], gmPermutedToken[gmOffsetD], gmPerTokenScale2[rowStartThisCore], coreNum);
             }
-            AscendC::SyncAll<true>();
+            kernel_detail::PtoSyncAll<true>();
             // Synchronization signal: SwiGLU notifies GMM2 [2]
             AscendC::CrossCoreSetFlag<0x2, PIPE_MTE3>(SYNCFLAGV2C);
         }
@@ -1061,7 +1129,7 @@ private:
 
         
         
-        AscendC::SyncAll<true>();
+        kernel_detail::PtoSyncAll<true>();
         ResetTokenPerExpert(params.EP * paddedExpertNumAligned);
 
         remoteWindow.CrossRankSync();
@@ -1082,7 +1150,7 @@ private:
         for (uint32_t t_groupIdx = 0; t_groupIdx < params.expertPerRank; ++t_groupIdx) {
             int32_t flagId = t_groupIdx / CROSS_CORE_FLAG_MAX_SET_COUNT;
             AscendC::CrossCoreWaitFlag<0x2>(flagId);
-            AscendC::SyncAll<true>();
+            kernel_detail::PtoSyncAll<true>();
 
             uint32_t groupIdx = t_groupIdx;
 

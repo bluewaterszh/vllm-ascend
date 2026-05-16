@@ -121,7 +121,7 @@ __aicore__ inline void MoeV2MrgsortOut::UpdateMrgParam() {
 
 __aicore__ inline void MoeV2MrgsortOut::CopyIn() {
   this->remainListNum = 0;
-  SetWaitFlag<HardEvent::MTE3_MTE2>(HardEvent::MTE3_MTE2);
+  pto_detail::PtoSetWaitFlag<HardEvent::MTE3_MTE2>(HardEvent::MTE3_MTE2);
   for (int64_t i = 0, j = 0; i < listNum; i++) {
     lengths[i] = Min(param->oneLoopMaxElements, listRemainElements[i]);
     if (lengths[i] > 0) {
@@ -135,7 +135,7 @@ __aicore__ inline void MoeV2MrgsortOut::CopyIn() {
 }
 
 __aicore__ inline void MoeV2MrgsortOut::MrgsortCompute() {
-  SetWaitFlag<HardEvent::MTE2_V>(HardEvent::MTE2_V);
+  pto_detail::PtoSetWaitFlag<HardEvent::MTE2_V>(HardEvent::MTE2_V);
   if (this->remainListNum > 1) {
     pto_detail::PtoMergePackedSortRecords(this->tempBuffer,
                                           this->mergeTmpBuffer,
@@ -173,7 +173,7 @@ __aicore__ inline void MoeV2MrgsortOut::Extract() {
 }
 
 __aicore__ inline void MoeV2MrgsortOut::CopyOut() {
-  SetWaitFlag<HardEvent::V_MTE3>(HardEvent::V_MTE3);
+  pto_detail::PtoSetWaitFlag<HardEvent::V_MTE3>(HardEvent::V_MTE3);
   pto_detail::PtoStoreVector(this->gmOutput1[outOffset], this->ubOutputInt1, curLoopSortedNum);
   pto_detail::PtoStoreVector(this->gmOutput2[outOffset], this->ubOutputInt2, curLoopSortedNum);
   outOffset += curLoopSortedNum;

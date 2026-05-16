@@ -25,6 +25,9 @@ using PtoStrideDyn = pto::Stride<pto::DYNAMIC, pto::DYNAMIC, pto::DYNAMIC, pto::
 template <typename Element>
 using PtoGlobalNd = pto::GlobalTensor<Element, PtoShapeDyn, PtoStrideDyn, pto::Layout::ND>;
 
+template <typename Element, int TileElems = 1024>
+using PtoVecTile = pto::Tile<pto::TileType::Vec, Element, 1, TileElems, pto::BLayout::RowMajor, -1, -1>;
+
 template <typename Element>
 PTO_DEVICE PtoGlobalNd<Element> MakeContiguousGlobal(AscendC::GlobalTensor<Element> const &tensor, uint32_t elemNum)
 {
@@ -34,18 +37,36 @@ PTO_DEVICE PtoGlobalNd<Element> MakeContiguousGlobal(AscendC::GlobalTensor<Eleme
     return PtoGlobalNd<Element>(ptr, shape, stride);
 }
 
+template <auto Pipe>
+PTO_DEVICE void PtoPipeBarrier()
+{
+    AscendC::PipeBarrier<Pipe>();
+}
+
+template <AscendC::HardEvent Event>
+PTO_DEVICE void PtoSetFlag(int32_t eventId)
+{
+    AscendC::SetFlag<Event>(eventId);
+}
+
+template <AscendC::HardEvent Event>
+PTO_DEVICE void PtoWaitFlag(int32_t eventId)
+{
+    AscendC::WaitFlag<Event>(eventId);
+}
+
 template <typename Element, int TileElems = 1024>
 PTO_DEVICE void PtoLoadVector(AscendC::LocalTensor<Element> const &dst,
-                                  AscendC::GlobalTensor<Element> const &src,
-                                  uint32_t elemNum)
+                              AscendC::GlobalTensor<Element> const &src,
+                              uint32_t elemNum)
 {
-    using PtoTile = pto::Tile<pto::TileType::Vec, Element, 1, TileElems, pto::BLayout::RowMajor, -1, -1>;
+    using Tile = PtoVecTile<Element, TileElems>;
     for (uint32_t offset = 0; offset < elemNum; offset += TileElems) {
         const uint32_t cur = (elemNum - offset > TileElems) ? TileElems : (elemNum - offset);
         auto dstChunk = dst[offset];
         auto srcChunk = src[offset];
         auto srcGlobal = MakeContiguousGlobal(srcChunk, cur);
-        PtoTile tile(1, cur);
+        Tile tile(1, cur);
         pto::TASSIGN(tile, reinterpret_cast<uint64_t>(dstChunk.GetPhyAddr()));
         pto::TLOAD(tile, srcGlobal);
     }
@@ -53,18 +74,199 @@ PTO_DEVICE void PtoLoadVector(AscendC::LocalTensor<Element> const &dst,
 
 template <typename Element, int TileElems = 1024>
 PTO_DEVICE void PtoStoreVector(AscendC::GlobalTensor<Element> const &dst,
-                                   AscendC::LocalTensor<Element> const &src,
-                                   uint32_t elemNum)
+                               AscendC::LocalTensor<Element> const &src,
+                               uint32_t elemNum)
 {
-    using PtoTile = pto::Tile<pto::TileType::Vec, Element, 1, TileElems, pto::BLayout::RowMajor, -1, -1>;
+    using Tile = PtoVecTile<Element, TileElems>;
     for (uint32_t offset = 0; offset < elemNum; offset += TileElems) {
         const uint32_t cur = (elemNum - offset > TileElems) ? TileElems : (elemNum - offset);
         auto dstChunk = dst[offset];
         auto srcChunk = src[offset];
         auto dstGlobal = MakeContiguousGlobal(dstChunk, cur);
-        PtoTile tile(1, cur);
+        Tile tile(1, cur);
         pto::TASSIGN(tile, reinterpret_cast<uint64_t>(srcChunk.GetPhyAddr()));
         pto::TSTORE(dstGlobal, tile);
+    }
+}
+
+template <typename DstElement, typename SrcElement, int TileElems = 1024>
+PTO_DEVICE void PtoCastVector(AscendC::LocalTensor<DstElement> const &dst,
+                              AscendC::LocalTensor<SrcElement> const &src,
+                              uint32_t elemNum,
+                              pto::RoundMode mode)
+{
+    using DstTile = PtoVecTile<DstElement, TileElems>;
+    using SrcTile = PtoVecTile<SrcElement, TileElems>;
+    for (uint32_t offset = 0; offset < elemNum; offset += TileElems) {
+        const uint32_t cur = (elemNum - offset > TileElems) ? TileElems : (elemNum - offset);
+        auto dstChunk = dst[offset];
+        auto srcChunk = src[offset];
+        DstTile dstTile(1, cur);
+        SrcTile srcTile(1, cur);
+        pto::TASSIGN(dstTile, reinterpret_cast<uint64_t>(dstChunk.GetPhyAddr()));
+        pto::TASSIGN(srcTile, reinterpret_cast<uint64_t>(srcChunk.GetPhyAddr()));
+        pto::TCVT(dstTile, srcTile, mode);
+    }
+}
+
+template <typename Element, int TileElems = 1024>
+PTO_DEVICE void PtoMulVector(AscendC::LocalTensor<Element> const &dst,
+                             AscendC::LocalTensor<Element> const &src,
+                             uint32_t elemNum,
+                             Element scalar)
+{
+    using Tile = PtoVecTile<Element, TileElems>;
+    for (uint32_t offset = 0; offset < elemNum; offset += TileElems) {
+        const uint32_t cur = (elemNum - offset > TileElems) ? TileElems : (elemNum - offset);
+        auto dstChunk = dst[offset];
+        auto srcChunk = src[offset];
+        Tile dstTile(1, cur);
+        Tile srcTile(1, cur);
+        pto::TASSIGN(dstTile, reinterpret_cast<uint64_t>(dstChunk.GetPhyAddr()));
+        pto::TASSIGN(srcTile, reinterpret_cast<uint64_t>(srcChunk.GetPhyAddr()));
+        pto::TMULS(dstTile, srcTile, scalar);
+    }
+}
+
+template <typename Element, int TileElems = 1024>
+PTO_DEVICE void PtoAddScalarVector(AscendC::LocalTensor<Element> const &dst,
+                                   AscendC::LocalTensor<Element> const &src,
+                                   uint32_t elemNum,
+                                   Element scalar)
+{
+    using Tile = PtoVecTile<Element, TileElems>;
+    for (uint32_t offset = 0; offset < elemNum; offset += TileElems) {
+        const uint32_t cur = (elemNum - offset > TileElems) ? TileElems : (elemNum - offset);
+        auto dstChunk = dst[offset];
+        auto srcChunk = src[offset];
+        Tile dstTile(1, cur);
+        Tile srcTile(1, cur);
+        pto::TASSIGN(dstTile, reinterpret_cast<uint64_t>(dstChunk.GetPhyAddr()));
+        pto::TASSIGN(srcTile, reinterpret_cast<uint64_t>(srcChunk.GetPhyAddr()));
+        pto::TADDS(dstTile, srcTile, scalar);
+    }
+}
+
+template <typename Element, int TileElems = 1024>
+PTO_DEVICE void PtoMulElementwiseVector(AscendC::LocalTensor<Element> const &dst,
+                                        AscendC::LocalTensor<Element> const &src0,
+                                        AscendC::LocalTensor<Element> const &src1,
+                                        uint32_t elemNum)
+{
+    using Tile = PtoVecTile<Element, TileElems>;
+    for (uint32_t offset = 0; offset < elemNum; offset += TileElems) {
+        const uint32_t cur = (elemNum - offset > TileElems) ? TileElems : (elemNum - offset);
+        auto dstChunk = dst[offset];
+        auto src0Chunk = src0[offset];
+        auto src1Chunk = src1[offset];
+        Tile dstTile(1, cur);
+        Tile src0Tile(1, cur);
+        Tile src1Tile(1, cur);
+        pto::TASSIGN(dstTile, reinterpret_cast<uint64_t>(dstChunk.GetPhyAddr()));
+        pto::TASSIGN(src0Tile, reinterpret_cast<uint64_t>(src0Chunk.GetPhyAddr()));
+        pto::TASSIGN(src1Tile, reinterpret_cast<uint64_t>(src1Chunk.GetPhyAddr()));
+        pto::TMUL(dstTile, src0Tile, src1Tile);
+    }
+}
+
+template <typename Element, int TileElems = 1024>
+PTO_DEVICE void PtoDivVector(AscendC::LocalTensor<Element> const &dst,
+                             AscendC::LocalTensor<Element> const &src0,
+                             AscendC::LocalTensor<Element> const &src1,
+                             uint32_t elemNum)
+{
+    using Tile = PtoVecTile<Element, TileElems>;
+    for (uint32_t offset = 0; offset < elemNum; offset += TileElems) {
+        const uint32_t cur = (elemNum - offset > TileElems) ? TileElems : (elemNum - offset);
+        auto dstChunk = dst[offset];
+        auto src0Chunk = src0[offset];
+        auto src1Chunk = src1[offset];
+        Tile dstTile(1, cur);
+        Tile src0Tile(1, cur);
+        Tile src1Tile(1, cur);
+        pto::TASSIGN(dstTile, reinterpret_cast<uint64_t>(dstChunk.GetPhyAddr()));
+        pto::TASSIGN(src0Tile, reinterpret_cast<uint64_t>(src0Chunk.GetPhyAddr()));
+        pto::TASSIGN(src1Tile, reinterpret_cast<uint64_t>(src1Chunk.GetPhyAddr()));
+        pto::TDIV(dstTile, src0Tile, src1Tile);
+    }
+}
+
+template <typename Element, int TileElems = 1024>
+PTO_DEVICE void PtoAbsVector(AscendC::LocalTensor<Element> const &dst,
+                             AscendC::LocalTensor<Element> const &src,
+                             uint32_t elemNum)
+{
+    using Tile = PtoVecTile<Element, TileElems>;
+    for (uint32_t offset = 0; offset < elemNum; offset += TileElems) {
+        const uint32_t cur = (elemNum - offset > TileElems) ? TileElems : (elemNum - offset);
+        auto dstChunk = dst[offset];
+        auto srcChunk = src[offset];
+        Tile dstTile(1, cur);
+        Tile srcTile(1, cur);
+        pto::TASSIGN(dstTile, reinterpret_cast<uint64_t>(dstChunk.GetPhyAddr()));
+        pto::TASSIGN(srcTile, reinterpret_cast<uint64_t>(srcChunk.GetPhyAddr()));
+        pto::TABS(dstTile, srcTile);
+    }
+}
+
+template <typename Element, int TileElems = 1024>
+PTO_DEVICE void PtoExpVector(AscendC::LocalTensor<Element> const &dst,
+                             AscendC::LocalTensor<Element> const &src,
+                             uint32_t elemNum)
+{
+    using Tile = PtoVecTile<Element, TileElems>;
+    for (uint32_t offset = 0; offset < elemNum; offset += TileElems) {
+        const uint32_t cur = (elemNum - offset > TileElems) ? TileElems : (elemNum - offset);
+        auto dstChunk = dst[offset];
+        auto srcChunk = src[offset];
+        Tile dstTile(1, cur);
+        Tile srcTile(1, cur);
+        pto::TASSIGN(dstTile, reinterpret_cast<uint64_t>(dstChunk.GetPhyAddr()));
+        pto::TASSIGN(srcTile, reinterpret_cast<uint64_t>(srcChunk.GetPhyAddr()));
+        pto::TEXP(dstTile, srcTile);
+    }
+}
+
+template <int TileElems = 1024>
+PTO_DEVICE void PtoReduceMaxVector(AscendC::LocalTensor<float> const &dst,
+                                   AscendC::LocalTensor<float> const &src,
+                                   AscendC::LocalTensor<float> const &tmp,
+                                   uint32_t elemNum)
+{
+    using SrcTile = PtoVecTile<float, TileElems>;
+    using TmpTile = PtoVecTile<float, TileElems>;
+    using RowMaxTile = pto::Tile<pto::TileType::Vec, float, 8, 1, pto::BLayout::ColMajor, -1, 1>;
+    using ScalarTile = pto::Tile<pto::TileType::Vec, float, 1, 8, pto::BLayout::RowMajor, -1, -1>;
+
+    bool firstChunk = true;
+    for (uint32_t offset = 0; offset < elemNum; offset += TileElems) {
+        const uint32_t cur = (elemNum - offset > TileElems) ? TileElems : (elemNum - offset);
+        auto srcChunk = src[offset];
+        auto tmpChunk = tmp[offset];
+        auto chunkMaxChunk = firstChunk ? dst[0] : tmp[0];
+
+        SrcTile srcTile(1, cur);
+        TmpTile tmpTile(1, cur);
+        RowMaxTile rowMaxTile(1);
+        pto::TASSIGN(srcTile, reinterpret_cast<uint64_t>(srcChunk.GetPhyAddr()));
+        pto::TASSIGN(tmpTile, reinterpret_cast<uint64_t>(tmpChunk.GetPhyAddr()));
+        pto::TASSIGN(rowMaxTile, reinterpret_cast<uint64_t>(chunkMaxChunk.GetPhyAddr()));
+        pto::TROWMAX(rowMaxTile, srcTile, tmpTile);
+        pto::TSYNC<pto::Op::TROWMAX>();
+
+        if (!firstChunk) {
+            auto accChunk = dst[0];
+            auto newChunk = tmp[0];
+            ScalarTile accTile(1, 1);
+            ScalarTile newTile(1, 1);
+            ScalarTile dstTile(1, 1);
+            pto::TASSIGN(accTile, reinterpret_cast<uint64_t>(accChunk.GetPhyAddr()));
+            pto::TASSIGN(newTile, reinterpret_cast<uint64_t>(newChunk.GetPhyAddr()));
+            pto::TASSIGN(dstTile, reinterpret_cast<uint64_t>(accChunk.GetPhyAddr()));
+            pto::TMAX(dstTile, accTile, newTile);
+            pto::TSYNC<pto::Op::TMAX>();
+        }
+        firstChunk = false;
     }
 }
 
@@ -161,8 +363,8 @@ public:
             eventUbDMTE3VList[i] = eventMTE3V++;
             eventUbDVMTE3List[i] = eventVMTE3++;
 
-            AscendC::SetFlag<AscendC::HardEvent::V_MTE2>(eventUbCVMTE2List[i]);
-            AscendC::SetFlag<AscendC::HardEvent::MTE3_V>(eventUbDMTE3VList[i]);
+            swiglu_detail::PtoSetFlag<AscendC::HardEvent::V_MTE2>(eventUbCVMTE2List[i]);
+            swiglu_detail::PtoSetFlag<AscendC::HardEvent::MTE3_V>(eventUbDMTE3VList[i]);
         }
 
         ubPerTokenScaleOutput = resource.ubBuf.template GetBufferByByte<float>(ubOffset);
@@ -171,8 +373,8 @@ public:
     void Finalize()
     {
         for (uint32_t i = 0; i < UB_STAGES; ++i) {
-            AscendC::WaitFlag<AscendC::HardEvent::V_MTE2>(eventUbCVMTE2List[i]);
-            AscendC::WaitFlag<AscendC::HardEvent::MTE3_V>(eventUbDMTE3VList[i]);
+            swiglu_detail::PtoWaitFlag<AscendC::HardEvent::V_MTE2>(eventUbCVMTE2List[i]);
+            swiglu_detail::PtoWaitFlag<AscendC::HardEvent::MTE3_V>(eventUbDMTE3VList[i]);
         }
     }
     PTO_DEVICE
@@ -236,88 +438,83 @@ public:
             auto &ubCFp32 = ubCFp32List[ubListId];
             auto &ubCFp32ChunkN = ubCFp32ChunkNList[ubListId];
             auto &ubAbs = ubCFp32ChunkNAbsList[ubListId];
-            // auto &ubMax = ubCFp32ChunkNMaxList[ubListId];
             auto &ubReduceMax = ubCFp32ChunkNMaxList[ubListId];
             auto &ubOutputTmp = ubAbs;
-            auto &sharedUbTmpBuffer = ubReduceMax;
             auto &ubQuantS32 = ubQuantS32List[ubListId];
             auto &ubQuantF16 = ubQuantF16List[ubListId];
 
             auto gmTileD = gmD[loopIdx * ChunkTileLen];
             // Move C from GM workspace to UB
-            AscendC::WaitFlag<AscendC::HardEvent::V_MTE2>(eventUbCVMTE2List[ubListId]);
+            swiglu_detail::PtoWaitFlag<AscendC::HardEvent::V_MTE2>(eventUbCVMTE2List[ubListId]);
             swiglu_detail::PtoLoadVector(ubC, gmTileC, blockN);
-            AscendC::SetFlag<AscendC::HardEvent::MTE2_V>(eventUbCMTE2VList[ubListId]);
+            swiglu_detail::PtoSetFlag<AscendC::HardEvent::MTE2_V>(eventUbCMTE2VList[ubListId]);
 
             // Cast C to FP32 in UB
-            AscendC::WaitFlag<AscendC::HardEvent::MTE2_V>(eventUbCMTE2VList[ubListId]);
-            AscendC::Cast(ubCFp32, ubC, AscendC::RoundMode::CAST_NONE, blockN);
-            AscendC::SetFlag<AscendC::HardEvent::V_MTE2>(eventUbCVMTE2List[ubListId]);
+            swiglu_detail::PtoWaitFlag<AscendC::HardEvent::MTE2_V>(eventUbCMTE2VList[ubListId]);
+            swiglu_detail::PtoCastVector(ubCFp32, ubC, blockN, pto::RoundMode::CAST_NONE);
+            swiglu_detail::PtoSetFlag<AscendC::HardEvent::V_MTE2>(eventUbCVMTE2List[ubListId]);
 
             // Get per-token scale from row loopIdx of gmPerTokenScale
             ElementPerTokenScale perTokenScale = gmPerTokenScale1(loopIdx);
 
-            AscendC::SetFlag<AscendC::HardEvent::S_V>(0);
-            AscendC::WaitFlag<AscendC::HardEvent::S_V>(0);
+            swiglu_detail::PtoSetFlag<AscendC::HardEvent::S_V>(0);
+            swiglu_detail::PtoWaitFlag<AscendC::HardEvent::S_V>(0);
             // Multiply FP32 C by the per-token scale
-            AscendC::PipeBarrier<PIPE_V>();
-            AscendC::Muls(ubCFp32, ubCFp32, perTokenScale, blockN);
-            AscendC::PipeBarrier<PIPE_V>();
+            swiglu_detail::PtoPipeBarrier<PIPE_V>();
+            swiglu_detail::PtoMulVector(ubCFp32, ubCFp32, blockN, perTokenScale);
+            swiglu_detail::PtoPipeBarrier<PIPE_V>();
 
             // Swiglu computation process
-            AscendC::Muls(ubCFp32ChunkN, ubCFp32, -1.0f, ChunkTileLen);
-            AscendC::PipeBarrier<PIPE_V>();
-            AscendC::Exp(ubCFp32ChunkN, ubCFp32ChunkN, ChunkTileLen);
-            AscendC::PipeBarrier<PIPE_V>();
-            AscendC::Adds(ubCFp32ChunkN, ubCFp32ChunkN, 1.0f, ChunkTileLen);
-            AscendC::PipeBarrier<PIPE_V>();
-            // TODO: confirm whether the division impacts subsequent data
-            AscendC::Div(ubCFp32ChunkN, ubCFp32, ubCFp32ChunkN, ChunkTileLen);
-            AscendC::PipeBarrier<PIPE_V>();
-            AscendC::Mul(ubCFp32ChunkN, ubCFp32ChunkN, ubCFp32[ChunkTileLen], ChunkTileLen);
+            swiglu_detail::PtoMulVector(ubCFp32ChunkN, ubCFp32, ChunkTileLen, -1.0f);
+            swiglu_detail::PtoPipeBarrier<PIPE_V>();
+            swiglu_detail::PtoExpVector(ubCFp32ChunkN, ubCFp32ChunkN, ChunkTileLen);
+            swiglu_detail::PtoPipeBarrier<PIPE_V>();
+            swiglu_detail::PtoAddScalarVector(ubCFp32ChunkN, ubCFp32ChunkN, ChunkTileLen, 1.0f);
+            swiglu_detail::PtoPipeBarrier<PIPE_V>();
+            swiglu_detail::PtoDivVector(ubCFp32ChunkN, ubCFp32, ubCFp32ChunkN, ChunkTileLen);
+            swiglu_detail::PtoPipeBarrier<PIPE_V>();
+            swiglu_detail::PtoMulElementwiseVector(ubCFp32ChunkN, ubCFp32ChunkN, ubCFp32[ChunkTileLen], ChunkTileLen);
 
             // Quantization process; difference between the two approaches
-            AscendC::PipeBarrier<PIPE_V>();
-            AscendC::Abs(ubAbs, ubCFp32ChunkN, ChunkTileLen);
-            AscendC::PipeBarrier<PIPE_V>();
+            swiglu_detail::PtoPipeBarrier<PIPE_V>();
+            swiglu_detail::PtoAbsVector(ubAbs, ubCFp32ChunkN, ChunkTileLen);
+            swiglu_detail::PtoPipeBarrier<PIPE_V>();
 
-            AscendC::ReduceMax<float>(ubReduceMax, ubAbs, sharedUbTmpBuffer, ChunkTileLen, false);
-            AscendC::PipeBarrier<PIPE_V>();
+            swiglu_detail::PtoReduceMaxVector(ubReduceMax, ubAbs, ubAbs, ChunkTileLen);
+            swiglu_detail::PtoPipeBarrier<PIPE_V>();
 
-            AscendC::SetFlag<AscendC::HardEvent::V_S>(0);
-            AscendC::WaitFlag<AscendC::HardEvent::V_S>(0);
+            swiglu_detail::PtoSetFlag<AscendC::HardEvent::V_S>(0);
+            swiglu_detail::PtoWaitFlag<AscendC::HardEvent::V_S>(0);
 
-            // TODO: compare the efficiency of the two calculation methods
             ElementPerTokenScale GMubDequantScale = ubReduceMax.GetValue(0);
-            AscendC::SetFlag<AscendC::HardEvent::S_V>(0);
+            swiglu_detail::PtoSetFlag<AscendC::HardEvent::S_V>(0);
 
             auto ubPerTokenScaleOutputOffset = loopIdx - loopStartIdx;
             ubPerTokenScaleOutput.SetValue(ubPerTokenScaleOutputOffset, GMubDequantScale / 127.f);
 
-            AscendC::WaitFlag<AscendC::HardEvent::S_V>(0);
-            AscendC::Muls(ubOutputTmp, ubCFp32ChunkN, 127.f / GMubDequantScale, ChunkTileLen);
-            AscendC::PipeBarrier<PIPE_V>();
+            swiglu_detail::PtoWaitFlag<AscendC::HardEvent::S_V>(0);
+            swiglu_detail::PtoMulVector(ubOutputTmp, ubCFp32ChunkN, ChunkTileLen, 127.f / GMubDequantScale);
+            swiglu_detail::PtoPipeBarrier<PIPE_V>();
 
-            AscendC::Cast(ubQuantS32, ubOutputTmp, AscendC::RoundMode::CAST_RINT, ChunkTileLen);
-            AscendC::PipeBarrier<PIPE_V>();
+            swiglu_detail::PtoCastVector(ubQuantS32, ubOutputTmp, ChunkTileLen, pto::RoundMode::CAST_RINT);
+            swiglu_detail::PtoPipeBarrier<PIPE_V>();
             AscendC::SetDeqScale(static_cast<half>(1.0));
-            AscendC::Cast(ubQuantF16, ubQuantS32, AscendC::RoundMode::CAST_RINT, ChunkTileLen);
-            AscendC::PipeBarrier<PIPE_V>();
+            swiglu_detail::PtoCastVector(ubQuantF16, ubQuantS32, ChunkTileLen, pto::RoundMode::CAST_RINT);
+            swiglu_detail::PtoPipeBarrier<PIPE_V>();
 
-            AscendC::WaitFlag<AscendC::HardEvent::MTE3_V>(eventUbDVMTE3List[ubListId]);
-            AscendC::Cast(ubD, ubQuantF16, AscendC::RoundMode::CAST_RINT, ChunkTileLen);
-            // AscendC::Muls(ubD, ubCFp32ChunkN, 127.f / GMubDequantScale, ChunkTileLen);
-            AscendC::SetFlag<AscendC::HardEvent::V_MTE3>(eventUbDMTE3VList[ubListId]);
+            swiglu_detail::PtoWaitFlag<AscendC::HardEvent::MTE3_V>(eventUbDVMTE3List[ubListId]);
+            swiglu_detail::PtoCastVector(ubD, ubQuantF16, ChunkTileLen, pto::RoundMode::CAST_RINT);
+            swiglu_detail::PtoSetFlag<AscendC::HardEvent::V_MTE3>(eventUbDMTE3VList[ubListId]);
 
-            AscendC::WaitFlag<AscendC::HardEvent::V_MTE3>(eventUbDVMTE3List[ubListId]);
+            swiglu_detail::PtoWaitFlag<AscendC::HardEvent::V_MTE3>(eventUbDVMTE3List[ubListId]);
             swiglu_detail::PtoStoreVector(gmTileD, ubD, ChunkTileLen);
-            AscendC::SetFlag<AscendC::HardEvent::MTE3_V>(eventUbDMTE3VList[ubListId]);
+            swiglu_detail::PtoSetFlag<AscendC::HardEvent::MTE3_V>(eventUbDMTE3VList[ubListId]);
             ubListId = (ubListId + 1 < UB_STAGES) ? (ubListId + 1) : 0;
         }
 
         if(tasksForIdx > 0){
-            AscendC::SetFlag<AscendC::HardEvent::S_MTE3>(EVENT_ID0);
-            AscendC::WaitFlag<AscendC::HardEvent::S_MTE3>(EVENT_ID0);
+            swiglu_detail::PtoSetFlag<AscendC::HardEvent::S_MTE3>(EVENT_ID0);
+            swiglu_detail::PtoWaitFlag<AscendC::HardEvent::S_MTE3>(EVENT_ID0);
 
             swiglu_detail::PtoStoreVector(gmPerTokenScale2[loopStartIdx], ubPerTokenScaleOutput[0], tasksForIdx);
         }

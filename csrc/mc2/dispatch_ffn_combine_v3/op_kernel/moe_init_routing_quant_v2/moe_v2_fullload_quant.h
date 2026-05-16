@@ -59,36 +59,25 @@ __aicore__ inline void MoeV2FullLoadQuant<T>::Compute(int64_t xLocalLength) {
 
   uint32_t elements = Align(this->cols, sizeof(int8_t)) * xLocalLength;
   if constexpr (IsSameType<T, bfloat16_t>::value) {
-    Cast(floatLocal, inLocal, RoundMode::CAST_NONE, elements);
-    AscendC::PipeBarrier<PIPE_V>();
-    Cast(halfLocal, floatLocal, RoundMode::CAST_NONE, elements);
-    AscendC::PipeBarrier<PIPE_V>();
-    Muls(halfLocal, halfLocal, static_cast<half>(this->scale), elements);
-    AscendC::PipeBarrier<PIPE_V>();
-    Adds(halfLocal, halfLocal, static_cast<half>(this->offset), elements);
-    AscendC::PipeBarrier<PIPE_V>();
+    pto_detail::PtoCastVector(floatLocal, inLocal, elements, pto::RoundMode::CAST_NONE);
+    pto_detail::PtoCastVector(halfLocal, floatLocal, elements, pto::RoundMode::CAST_NONE);
+    pto_detail::PtoMulVector(halfLocal, halfLocal, elements, static_cast<half>(this->scale));
+    pto_detail::PtoAddScalarVector(halfLocal, halfLocal, elements, static_cast<half>(this->offset));
     LocalTensor<int32_t> intLocal = floatLocal.ReinterpretCast<int32_t>();
-    Cast(intLocal, halfLocal, RoundMode::CAST_RINT, elements);
-    AscendC::PipeBarrier<PIPE_V>();
+    pto_detail::PtoCastVector(intLocal, halfLocal, elements, pto::RoundMode::CAST_RINT);
     SetDeqScale((half)1.000000e+00f);
-    AscendC::PipeBarrier<PIPE_V>();
-    Cast(halfLocal, intLocal, RoundMode::CAST_RINT, elements);
-    AscendC::PipeBarrier<PIPE_V>();
-    Cast(outLocal, halfLocal, RoundMode::CAST_RINT, elements);
+    pto_detail::PtoPipeBarrier<PIPE_V>();
+    pto_detail::PtoCastVector(halfLocal, intLocal, elements, pto::RoundMode::CAST_RINT);
+    pto_detail::PtoCastVector(outLocal, halfLocal, elements, pto::RoundMode::CAST_RINT);
   } else if constexpr (IsSameType<T, float>::value) {
-    Cast(halfLocal, inLocal, RoundMode::CAST_NONE, elements);
-    AscendC::PipeBarrier<PIPE_V>();
-    Muls(halfLocal, halfLocal, static_cast<half>(this->scale), elements);
-    AscendC::PipeBarrier<PIPE_V>();
-    Adds(halfLocal, halfLocal, static_cast<half>(this->offset), elements);
-    AscendC::PipeBarrier<PIPE_V>();
-    Cast(outLocal, halfLocal, RoundMode::CAST_RINT, elements);
+    pto_detail::PtoCastVector(halfLocal, inLocal, elements, pto::RoundMode::CAST_NONE);
+    pto_detail::PtoMulVector(halfLocal, halfLocal, elements, static_cast<half>(this->scale));
+    pto_detail::PtoAddScalarVector(halfLocal, halfLocal, elements, static_cast<half>(this->offset));
+    pto_detail::PtoCastVector(outLocal, halfLocal, elements, pto::RoundMode::CAST_RINT);
   } else {
-    Muls(inLocal, inLocal, static_cast<T>(this->scale), elements);
-    AscendC::PipeBarrier<PIPE_V>();
-    Adds(inLocal, inLocal, static_cast<T>(this->offset), elements);
-    AscendC::PipeBarrier<PIPE_V>();
-    Cast(outLocal, inLocal, RoundMode::CAST_RINT, elements);
+    pto_detail::PtoMulVector(inLocal, inLocal, elements, static_cast<T>(this->scale));
+    pto_detail::PtoAddScalarVector(inLocal, inLocal, elements, static_cast<T>(this->offset));
+    pto_detail::PtoCastVector(outLocal, inLocal, elements, pto::RoundMode::CAST_RINT);
   }
   inputXCopyOutQueue.EnQue(outLocal);
   xCopyInQueue.FreeTensor(inLocal);

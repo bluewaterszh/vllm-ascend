@@ -43,6 +43,35 @@ PTO_INTERNAL PtoV2GlobalNd<Element> MakeContiguousGlobal(const GlobalTensor<Elem
     return PtoV2GlobalNd<Element>(ptr, shape, stride);
 }
 
+template <auto Pipe>
+PTO_INTERNAL void PtoPipeBarrier()
+{
+    AscendC::PipeBarrier<Pipe>();
+}
+
+template <AscendC::HardEvent Event>
+PTO_INTERNAL void PtoSetFlag(int32_t eventId)
+{
+    AscendC::SetFlag<Event>(eventId);
+}
+
+template <AscendC::HardEvent Event>
+PTO_INTERNAL void PtoWaitFlag(int32_t eventId)
+{
+    AscendC::WaitFlag<Event>(eventId);
+}
+
+template <AscendC::HardEvent Event>
+PTO_INTERNAL void PtoSetWaitFlag(AscendC::HardEvent eventId)
+{
+    SetWaitFlag<Event>(eventId);
+}
+
+PTO_INTERNAL void PtoSyncAll()
+{
+    AscendC::SyncAll();
+}
+
 template <typename Element, int TileElems = 1024>
 PTO_INTERNAL void PtoMoveVector(const LocalTensor<Element> &dstLocal, const LocalTensor<Element> &srcLocal, uint32_t elemNum)
 {
@@ -164,6 +193,30 @@ PTO_INTERNAL void PtoAddScalarVector(const LocalTensor<Element> &dstLocal,
 }
 
 template <typename Element, int TileElems = 1024>
+PTO_INTERNAL void PtoAddVector(const LocalTensor<Element> &dstLocal,
+                               const LocalTensor<Element> &src0Local,
+                               const LocalTensor<Element> &src1Local,
+                               uint32_t elemNum)
+{
+    using Tile = PtoV2VecTile<Element, TileElems>;
+    for (uint32_t offset = 0; offset < elemNum; offset += TileElems) {
+        const uint32_t cur = (elemNum - offset < static_cast<uint32_t>(TileElems))
+                                 ? (elemNum - offset)
+                                 : static_cast<uint32_t>(TileElems);
+        auto dstChunk = dstLocal[offset];
+        auto src0Chunk = src0Local[offset];
+        auto src1Chunk = src1Local[offset];
+        Tile dstTile(1, cur);
+        Tile src0Tile(1, cur);
+        Tile src1Tile(1, cur);
+        pto::TASSIGN(dstTile, reinterpret_cast<uint64_t>(dstChunk.GetPhyAddr()));
+        pto::TASSIGN(src0Tile, reinterpret_cast<uint64_t>(src0Chunk.GetPhyAddr()));
+        pto::TASSIGN(src1Tile, reinterpret_cast<uint64_t>(src1Chunk.GetPhyAddr()));
+        pto::TADD(dstTile, src0Tile, src1Tile);
+    }
+}
+
+template <typename Element, int TileElems = 1024>
 PTO_INTERNAL void PtoMulElementwiseVector(const LocalTensor<Element> &dstLocal,
                                           const LocalTensor<Element> &src0Local,
                                           const LocalTensor<Element> &src1Local,
@@ -228,6 +281,51 @@ PTO_INTERNAL void PtoDivVector(const LocalTensor<Element> &dstLocal,
         pto::TASSIGN(src0Tile, reinterpret_cast<uint64_t>(src0Chunk.GetPhyAddr()));
         pto::TASSIGN(src1Tile, reinterpret_cast<uint64_t>(src1Chunk.GetPhyAddr()));
         pto::TDIV(dstTile, src0Tile, src1Tile);
+    }
+}
+
+template <int TileElems = 1024>
+PTO_INTERNAL void PtoReduceMaxVector(const LocalTensor<float> &dstLocal,
+                                     const LocalTensor<float> &srcLocal,
+                                     const LocalTensor<float> &tmpLocal,
+                                     uint32_t elemNum)
+{
+    using SrcTile = PtoV2VecTile<float, TileElems>;
+    using TmpTile = PtoV2VecTile<float, TileElems>;
+    using RowMaxTile = pto::Tile<pto::TileType::Vec, float, 8, 1, pto::BLayout::ColMajor, -1, 1>;
+    using ScalarTile = pto::Tile<pto::TileType::Vec, float, 1, 8, pto::BLayout::RowMajor, -1, -1>;
+
+    bool firstChunk = true;
+    for (uint32_t offset = 0; offset < elemNum; offset += TileElems) {
+        const uint32_t cur = (elemNum - offset < static_cast<uint32_t>(TileElems))
+                                 ? (elemNum - offset)
+                                 : static_cast<uint32_t>(TileElems);
+        auto srcChunk = srcLocal[offset];
+        auto tmpChunk = tmpLocal[offset];
+        auto chunkMaxChunk = firstChunk ? dstLocal[0] : tmpLocal[0];
+
+        SrcTile srcTile(1, cur);
+        TmpTile tmpTile(1, cur);
+        RowMaxTile rowMaxTile(1);
+        pto::TASSIGN(srcTile, reinterpret_cast<uint64_t>(srcChunk.GetPhyAddr()));
+        pto::TASSIGN(tmpTile, reinterpret_cast<uint64_t>(tmpChunk.GetPhyAddr()));
+        pto::TASSIGN(rowMaxTile, reinterpret_cast<uint64_t>(chunkMaxChunk.GetPhyAddr()));
+        pto::TROWMAX(rowMaxTile, srcTile, tmpTile);
+        pto::TSYNC<pto::Op::TROWMAX>();
+
+        if (!firstChunk) {
+            auto accChunk = dstLocal[0];
+            auto newChunk = tmpLocal[0];
+            ScalarTile accTile(1, 1);
+            ScalarTile newTile(1, 1);
+            ScalarTile dstTile(1, 1);
+            pto::TASSIGN(accTile, reinterpret_cast<uint64_t>(accChunk.GetPhyAddr()));
+            pto::TASSIGN(newTile, reinterpret_cast<uint64_t>(newChunk.GetPhyAddr()));
+            pto::TASSIGN(dstTile, reinterpret_cast<uint64_t>(accChunk.GetPhyAddr()));
+            pto::TMAX(dstTile, accTile, newTile);
+            pto::TSYNC<pto::Op::TMAX>();
+        }
+        firstChunk = false;
     }
 }
 

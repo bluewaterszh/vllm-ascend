@@ -100,7 +100,7 @@ __aicore__ inline void MoeV2GatherQuant<T>::Compute() {
     LocalTensor<int32_t> intLocal = floatLocal.ReinterpretCast<int32_t>();
     pto_detail::PtoCastVector(intLocal, halfLocal, elements, pto::RoundMode::CAST_RINT);
     SetDeqScale((half)1.000000e+00f);
-    AscendC::PipeBarrier<PIPE_V>();
+    pto_detail::PtoPipeBarrier<PIPE_V>();
     pto_detail::PtoCastVector(halfLocal, intLocal, elements, pto::RoundMode::CAST_RINT);
     pto_detail::PtoCastVector(outLocal, halfLocal, elements, pto::RoundMode::CAST_RINT);
   } else if constexpr (IsSameType<T, float>::value) {
@@ -121,7 +121,7 @@ __aicore__ inline void MoeV2GatherQuant<T>::Compute() {
 template <typename T>
 __aicore__ inline void MoeV2GatherQuant<T>::CopyOut(int64_t progress) {
   LocalTensor<int32_t> indicesLocal = expandRowIdxCopyInQueue.DeQue<int32_t>();
-  SetWaitFlag<HardEvent::MTE2_S>(HardEvent::MTE2_S);
+  pto_detail::PtoSetWaitFlag<HardEvent::MTE2_S>(HardEvent::MTE2_S);
   colsTileLength = this->perLoopCols;
   for (int64_t colsLoop = 0; colsLoop < this->colLoops; colsLoop++) {
     int64_t initialRow = this->gatherOutTilingData->perCoreRows * this->blockIdx + this->perLoopRows * progress;

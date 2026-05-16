@@ -16,6 +16,7 @@
 #define INNER_MOE_V2_SORT_BASE_H
 
 #include "kernel_operator.h"
+#include "moe_v2_pto_sort.h"
 
 namespace MoeInitRoutingQuantV2 {
 using namespace AscendC;
@@ -61,7 +62,7 @@ __aicore__ inline void MoeV2SortBase::SyncAll() {
   if (coreNum == 1) {
     return;
   }
-  AscendC::SyncAll();
+  pto_detail::PtoSyncAll();
 }
 
 }  // namespace MoeInitRoutingQuantV2
