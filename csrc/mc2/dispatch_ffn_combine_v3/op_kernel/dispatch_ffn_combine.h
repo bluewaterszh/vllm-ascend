@@ -355,7 +355,8 @@ __aicore__ inline void DispatchFFNCombine<TemplateMMA2ACFunc>::Process()
     pto_ext::layout::ND layoutD2{static_cast<uint32_t>(m*topK), static_cast<uint32_t>(n2)};
     // Prepare params
 
-    pto_ext::GemmCoord problemShape{static_cast<uint32_t>(m), static_cast<uint32_t>(n), static_cast<uint32_t>(k)};
+    pto_ext::PtoShape3D problemShape = pto_ext::MakePtoShape3D(
+        static_cast<uint32_t>(m), static_cast<uint32_t>(n), static_cast<uint32_t>(k));
 
     uint32_t epilogueCoreNum = aivNum;
     uint32_t epilogueGranularity = expertPerRank - 3;

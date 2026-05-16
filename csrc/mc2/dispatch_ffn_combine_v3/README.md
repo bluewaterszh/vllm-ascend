@@ -471,3 +471,200 @@ Reference functional regression pass after the naming cleanup:
 Interpretation:
 - This checkpoint was a naming-only cleanup pass; it did not change the standalone ABI, tiling contract, or kernel math path.
 - The perf movement on these short runs should be treated as checkpoint noise unless it repeats on the large-case stability loop.
+
+## PTO layout-surface checkpoint
+
+Current status:
+- The live layout adapters in `op_kernel/utils/dispatch_policy_custom.hpp` now store PTO `Shape` / `Stride` objects instead of the older local `Coord` storage.
+- The live layout adapters also carry PTO metadata (`kPtoLayout`, `kTileLayout`, `kBLayout`, `kSLayout`), so layout intent is now expressed in PTO terms instead of only by concrete local type names.
+- `op_kernel/utils/select_helper.hpp` now chooses the Zn B-layout path by PTO `TileLayoutCustom::ZN` instead of hard-coding a concrete local layout type match.
+- `op_kernel/utils/block_mmad_preload_async_fixpipe_quant.hpp` no longer relies on static global layout objects for the L1 tile layouts; it now rebuilds those PTO-backed layouts through device helpers so the new non-literal layout storage remains valid in AICORE code.
+- A fresh rebuild after this header-level shrink still keeps both reference cases at `PASS`.
+
+Reference functional regression pass after the layout-surface checkpoint:
+- small case: kernel `31.73 us`, e2e `113.84 us`, `PASS`
+- large case: kernel `32.43 us`, e2e `118.46 us`, `PASS`
+
+Performance state relative to the earlier PTO naming cleanup checkpoint:
+- small case: kernel `-1.3%`, e2e `-11.6%`
+- large case: kernel `-17.1%`, e2e `-5.5%`
+
+Interpretation:
+- This is the first Phase 1 checkpoint that changes the live compat surface semantics instead of only renaming identifiers.
+- The remaining local coord shell is now narrower but not gone: `MatrixCoord` / `GemmCoord` still cluster in `dispatch_ffn_combine_kernel.hpp`, `block_mmad_preload_async_fixpipe_quant.hpp`, and the epilogue shells, which matches the next compute-side PTO migration target.
+- The standalone ABI, kernel entry contract, and output correctness remain stable after the PTO-backed layout storage swap.
+
+## PTO compute-shape helper checkpoint
+
+Current status:
+- The hot offset/tile-shape math in `op_kernel/utils/block_mmad_preload_async_fixpipe_quant.hpp` now routes through PTO-backed helper coords/shapes (`MakePtoCoord*`, `MulPtoCoord2D`, `ToPtoShape*`) instead of rebuilding local `MatrixCoord` objects at each GM/L1/L0 shell seam.
+- The top-level live compute path in `op_kernel/dispatch_ffn_combine_kernel.hpp` now also uses PTO-backed coord/shape descriptors for block offsets, block-scheduler tile shape updates, and GM tile-view assembly in the GMM1/GMM2 paths.
+- The remaining local coord shell is pushed outward to the scheduler/epilogue interface boundary rather than the inner compute-side layout math.
+- A fresh rebuild after this compute-side helper swap still keeps both reference cases at `PASS`.
+
+Reference functional regression pass after the compute-shape helper checkpoint:
+- small case: kernel `29.65 us`, e2e `111.77 us`, `PASS`
+- large case: kernel `27.09 us`, e2e `119.16 us`, `PASS`
+
+Performance state relative to the earlier PTO layout-surface checkpoint:
+- small case: kernel `-6.6%`, e2e `-1.8%`
+- large case: kernel `-16.5%`, e2e `+0.6%`
+
+Interpretation:
+- The inner compute-side shape plumbing can move toward PTO descriptors without reopening the earlier large-case correctness regressions.
+- The remaining non-PTO coord surface is now mostly at the `GemmCoord` / `MatrixCoord` boundary shared with the epilogue shells, which is the next lower-risk migration target.
+- The only new build noise from this batch was duplicate `inline` spelling on the PTO helper wrappers; that warning can be removed without changing the live kernel contract.
+
+## PTO epilogue-interface checkpoint
+
+Current status:
+- The row/SwiGLU epilogue shells now accept PTO 2D shape descriptors at the kernel boundary instead of local `MatrixCoord` wrappers.
+- The `CombineV2` path now also hands the per-tile epilogue entry PTO 2D coord/shape descriptors instead of synthesizing `GemmCoord {m, n, 1}` placeholders for a K dimension that the epilogue path never used.
+- The device-side epilogue internals keep the previously validated load/store order, remote scratch-store behavior, and `TPUT` sequencing; only the boundary descriptor type is changed.
+- A fresh rebuild after this boundary shift still keeps both reference cases at `PASS`.
+
+Reference functional regression pass after the epilogue-interface checkpoint:
+- small case: kernel `30.30 us`, e2e `113.64 us`, `PASS`
+- large case: kernel `30.10 us`, e2e `119.93 us`, `PASS`
+
+Performance state relative to the earlier PTO compute-shape helper checkpoint:
+- small case: kernel `+2.2%`, e2e `+1.7%`
+- large case: kernel `+11.1%`, e2e `+0.6%`
+
+Interpretation:
+- This confirms the next low-risk seam: the epilogue call boundary can be expressed in PTO shape/coord terms without changing the already-stabilized remote-store and dequant shells.
+- The remaining local coord logic is now concentrated mainly in the scheduler-facing side of `dispatch_ffn_combine_kernel.hpp` and `dispatch_policy_custom.hpp`, not in the epilogue interfaces themselves.
+- The large-case e2e path stayed effectively flat on this short loop, so this seam remains function-first acceptable and can be left in place for the later optimization pass.
+
+## PTO scheduler-shape checkpoint
+
+Current status:
+- `dispatch_policy_custom.hpp` now keeps the live `GemmIdentityBlockSwizzle` tile/loop bookkeeping in PTO 2D shapes instead of local `MatrixCoord` members.
+- The scheduler exposes PTO MN getters, and the `CombineV2` epilogue launch path now consumes those PTO descriptors directly instead of re-expanding local scheduler coords back into PTO shape/coord objects in-kernel.
+- The deeper GMM block scheduler contract is still intentionally left compatible with the existing `GemmCoord` matmul path, so this batch only shrinks the scheduler-facing compat shell instead of rewriting the live matmul launch ABI.
+- A fresh rebuild after this scheduler-facing shrink still keeps both reference cases at `PASS`.
+
+Reference functional regression pass after the scheduler-shape checkpoint:
+- small case: kernel `31.53 us`, e2e `112.79 us`, `PASS`
+- large case sanity rerun: kernel `33.56 us`, e2e `111.95 us`, `PASS`
+
+Observed large-case noisy outlier on the same short loop:
+- first run after this batch: kernel `47.41 us`, e2e `144.39 us`, `PASS`, with kernel `std=20.53 us`
+- immediate rerun: kernel `33.56 us`, e2e `111.95 us`, `PASS`, with kernel `std=7.04 us`
+
+Performance state relative to the earlier PTO epilogue-interface checkpoint:
+- small case: kernel `+4.1%`, e2e `-0.8%`
+- large case sanity rerun: kernel `+11.5%`, e2e `-6.7%`
+
+Interpretation:
+- The scheduler-facing compat shell can shrink further toward PTO-native shape bookkeeping without breaking output correctness or the standalone ABI.
+- The first large-case short-loop sample after this batch was a noise spike rather than a stable new baseline; keep using reruns or the longer stability loop before drawing performance conclusions from scheduler-only changes.
+- The remaining non-PTO coord surface is now mostly on the GMM-side `problemShape / actualBlockShape` contract, which is a larger seam than the scheduler bookkeeping that was migrated here.
+
+## PTO comm-signal checkpoint
+
+Current status:
+- `op_kernel/utils/hccl_shmem.hpp` now expresses the live token-ready and cross-rank barrier behavior directly in terms of `pto::comm::Signal`, `TNOTIFY`, and `TWAIT` at the call site instead of routing those paths through an extra local wait/notify helper layer.
+- The signal-region layout, epoch counters, and peer-window offsets are unchanged; this batch only shrinks the protocol-expression shell around them.
+- The temporary lvalue requirement of PTO comm primitives is handled locally by binding the signal objects before `TNOTIFY/TWAIT`, so the live call sites stay PTO-native without changing the memory contract.
+- A fresh rebuild after this comm-signal cleanup still keeps both reference cases at `PASS`.
+
+Reference functional regression pass after the comm-signal checkpoint:
+- small case: kernel `32.24 us`, e2e `119.79 us`, `PASS`
+- large case: kernel `27.90 us`, e2e `139.83 us`, `PASS`
+
+Performance state relative to the earlier PTO scheduler-shape checkpoint:
+- small case: kernel `+2.3%`, e2e `+6.2%`
+- large case: kernel `-16.9%`, e2e `+24.9%`
+
+Interpretation:
+- The kernel-side communication semantics are now closer to PTO-native expression while keeping the existing signal-region ABI stable.
+- The large-case kernel time stayed healthy on this short loop, but the e2e sample is still too noisy to treat as a conclusion about the communication cleanup itself.
+- The next remaining shell is primarily host-side metadata parsing and staging in `runtime_context.cpp` / `hccl_context.hpp`, not the device-side signal protocol expression.
+
+## PTO runtime-metadata shell checkpoint
+
+Current status:
+- `op_kernel/utils/hccl_context.hpp` now exposes only the shared `HcclDeviceContext` surface used by the live runtime/kernel path.
+- The host-only HCCL compat metadata structs used to rebuild that context were moved into `runtime_context.cpp`, so the resource-layout parsing shell is now local to the runtime implementation instead of leaking through a shared header.
+- The standalone ABI, workspace layout, and device-side signal/window contract are unchanged; this batch only shrinks the host/runtime metadata shell around them.
+- A fresh rebuild after this header/runtime split still keeps both reference cases at `PASS`.
+
+Reference functional regression pass after the runtime-metadata shell checkpoint:
+- small case: kernel `52.16 us`, e2e `157.14 us`, `PASS`, with kernel `std=41.68 us`
+- large case: kernel `28.78 us`, e2e `110.36 us`, `PASS`
+
+Performance state relative to the earlier PTO comm-signal checkpoint:
+- small case: kernel `+61.8%`, e2e `+31.2%`
+- large case: kernel `+3.2%`, e2e `-21.1%`
+
+Interpretation:
+- The host/runtime metadata shell can shrink further without reopening the older in-kernel HCCL resource parsing path or changing the live device context ABI.
+- The small-case sample on this short loop was clearly noisy and should not be treated as a new baseline by itself.
+- The large case stayed functionally and performance-wise healthy enough to keep this shell cleanup in place while the next PTO-native runtime/context seam is reduced.
+
+## PTO runtime access-helper checkpoint
+
+Current status:
+- `StandaloneHcclContext` now exposes small helper accessors for the live PTO device-context pointer and peer-window metadata instead of forcing call sites to reach into `host_ctx` / `device_ctx` fields directly.
+- `main.cpp` zero-window preparation and `tiling_builder.cpp` runtime-context wiring now consume that narrower helper seam rather than the raw storage fields.
+- The local context-rebuild helpers in `runtime_context.cpp` now operate on `StandaloneHcclContext` directly, so the host/runtime metadata reconstruction shell no longer drags the whole `StandaloneRankRuntime` object through those internal helpers.
+- A fresh rebuild after this helper-side shrink still keeps both reference cases at `PASS`.
+
+Reference functional regression pass after the runtime access-helper checkpoint:
+- small case: kernel `36.44 us`, e2e `124.54 us`, `PASS`, with kernel `std=8.88 us`
+- large case sanity rerun: kernel `29.83 us`, e2e `116.89 us`, `PASS`, with kernel `std=9.19 us`
+
+Observed large-case noisy sample on the same short loop:
+- first run after the internal helper cleanup: kernel `30.78 us`, e2e `111.27 us`, `PASS`, with kernel `std=14.96 us`
+- immediate rerun: kernel `29.83 us`, e2e `116.89 us`, `PASS`, with kernel `std=9.19 us`
+
+Performance state relative to the earlier PTO runtime-metadata shell checkpoint:
+- small case: kernel `-30.1%`, e2e `-20.7%`
+- large case sanity rerun: kernel `+3.6%`, e2e `+5.9%`
+
+Interpretation:
+- The shared runtime/context surface is now thinner at the call boundary: external users no longer need to know where the PTO context stores windows or which raw pointer field should be passed into tiling.
+- The short-loop samples are still noisy, especially on the large-case rerun pair, so this checkpoint should be treated as a function-first shell shrink rather than a performance claim.
+- The next remaining runtime-side shell is mainly the `host_ctx` fill/copy body inside `runtime_context.cpp`, not the external call sites around it.
+
+## PTO runtime+compute contract checkpoint
+
+Current status:
+- `StandaloneHcclContext` now owns the remaining host-side PTO context assembly operations (`reset / workspace / rank-info / window-fill / host↔device copy`) instead of leaving raw `host_ctx` field writes spread across `runtime_context.cpp`.
+- The live GMM contract in `dispatch_ffn_combine_kernel.hpp` and `block_mmad_preload_async_fixpipe_quant.hpp` now passes PTO 3D shapes instead of `GemmCoord` at the kernel/block-matmul boundary.
+- The GMM1/GMM2 loops now use the scheduler's PTO MN getters plus PTO 3D actual-shape descriptors, so the old `GemmCoord` contract no longer leaks through the live compute path.
+- The host stub entry in `op_kernel/dispatch_ffn_combine.h` now builds the problem shape as PTO `PtoShape3D`, keeping the launch-side contract aligned with the kernel-side change.
+- A fresh rebuild after this combined runtime/compute shell shrink still keeps both reference cases at `PASS`.
+
+Reference functional regression pass after the runtime+compute contract checkpoint:
+- small case: kernel `38.96 us`, e2e `131.12 us`, `PASS`, with kernel `std=7.98 us`
+- large case sanity rerun: kernel `32.37 us`, e2e `118.42 us`, `PASS`, with kernel `std=12.16 us`
+
+Observed large-case noisy sample on the same short loop:
+- first run after the combined checkpoint: kernel `32.73 us`, e2e `128.56 us`, `PASS`, with kernel `std=13.41 us`
+- immediate rerun: kernel `32.37 us`, e2e `118.42 us`, `PASS`, with kernel `std=12.16 us`
+
+Performance state relative to the earlier PTO runtime access-helper checkpoint:
+- small case: kernel `+6.9%`, e2e `+5.3%`
+- large case sanity rerun: kernel `+8.5%`, e2e `+1.3%`
+
+Interpretation:
+- The last live `GemmCoord` contract on the GMM path is now mostly pushed back into `dispatch_policy_custom.hpp` internals; the active kernel/block-matmul seam itself is PTO-shaped.
+- The runtime-side `host_ctx` assembly shell is now concentrated in `StandaloneHcclContext` methods instead of being open-coded in the ring-context rebuild path.
+- The short-loop perf samples remain noisy, so this checkpoint should be treated as a semantic contract shrink first and a performance data point second.
+
+## PTO final source-tail cleanup checkpoint
+
+Current status:
+- `dispatch_policy_custom.hpp` no longer keeps the live `GemmCoord` scheduler contract; the block swizzle surface is PTO-shape only.
+- `runtime_context.hpp` / `runtime_context.cpp` now keep the device attach/free lifecycle inside `StandaloneHcclContext`, and the dead host-context accessors were removed.
+- A fresh rebuild after this final cleanup still keeps both reference cases at `PASS`.
+
+Reference functional regression pass after the final cleanup:
+- small case: kernel `24.48 us`, e2e `104.06 us`, `PASS`
+- large case: kernel `31.19 us`, e2e `120.29 us`, `PASS`
+
+Interpretation:
+- This closes the remaining non-performance tail for the current Stage 3b pass.
+- The remaining movement in the short-loop perf numbers should be treated as checkpoint noise or later optimization input, not as a functional regression.

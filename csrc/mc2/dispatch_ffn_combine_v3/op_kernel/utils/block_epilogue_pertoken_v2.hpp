@@ -196,8 +196,8 @@ public:
     void operator() (
         AscendC::GlobalTensor<ElementC> const &gmC,
         AscendC::GlobalTensor<ElementPerTokenScale> const &gmPerTokenScale,
-        GemmCoord& blockCoord,
-        GemmCoord& actualBlockShape,
+        PtoCoord2D const &blockCoord,
+        PtoShape2D const &actualBlockShape,
         int32_t groupIdx,
         int32_t preSrcExpertSum,
         AscendC::GlobalTensor<int32_t> preSumBeforeRank
@@ -205,16 +205,20 @@ public:
         is_ping = !is_ping;
         auto event_id = is_ping ? EVENT_ID0 : EVENT_ID1;
         auto event_id_2 = is_ping ? EVENT_ID2 : EVENT_ID3;
+        int32_t blockRow = static_cast<int32_t>(blockCoord.shape[0]);
+        int32_t blockCol = static_cast<int32_t>(blockCoord.shape[1]);
+        uint32_t actualM = static_cast<uint32_t>(actualBlockShape.shape[0]);
+        uint32_t actualN = static_cast<uint32_t>(actualBlockShape.shape[1]);
 
         auto &ubC = ubCList[is_ping];
         auto &ubD = ubDList[is_ping];
-        int32_t gmCOffset = preSrcExpertSum * params.n2 + blockCoord.m() * params.n2 + blockCoord.n();
+        int32_t gmCOffset = preSrcExpertSum * params.n2 + blockRow * params.n2 + blockCol;
         auto gmTileC = gmC[gmCOffset];
         auto &ubCFp32 = ubFp32List[is_ping];
         auto &scaleUb = scaleUbList[is_ping];
 
         AscendC::WaitFlag<AscendC::HardEvent::V_MTE2>(event_id);
-        detail::PtoLoadMatrixRows(ubC, gmTileC, actualBlockShape.m(), actualBlockShape.n(), n0, params.n2);
+        detail::PtoLoadMatrixRows(ubC, gmTileC, actualM, actualN, n0, params.n2);
         AscendC::SetFlag<AscendC::HardEvent::MTE2_V>(event_id);
 
         AscendC::WaitFlag<AscendC::HardEvent::MTE2_V>(event_id);
@@ -225,10 +229,10 @@ public:
         AscendC::WaitFlag<AscendC::HardEvent::V_MTE2>(event_id_2);
         AscendC::WaitFlag<AscendC::HardEvent::S_MTE2>(event_id_2);
 
-        int32_t gmScaleOffset = preSrcExpertSum + blockCoord.m();
+        int32_t gmScaleOffset = preSrcExpertSum + blockRow;
         if (source_scale_offset[event_id] != gmScaleOffset) {
                 source_scale_offset[event_id] = gmScaleOffset;
-                detail::PtoLoadVector(scaleUb, gmPerTokenScale[gmScaleOffset], actualBlockShape.m());
+                detail::PtoLoadVector(scaleUb, gmPerTokenScale[gmScaleOffset], actualM);
         }
 
         AscendC::SetFlag<AscendC::HardEvent::MTE2_S>(event_id_2);
@@ -241,9 +245,9 @@ public:
         AscendC::WaitFlag<AscendC::HardEvent::MTE2_S>(event_id_2); // Note that the value must be MTE2_S instead of MTE2_V.
                                                                    // Otherwise, 0 will be read, causing garbled characters.
         AscendC::PipeBarrier<PIPE_V>();
-        for (int32_t row = 0; row < actualBlockShape.m(); ++row) {
+        for (uint32_t row = 0; row < actualM; ++row) {
                 float scale = scaleUb(row);
-                Muls<float, false>(ubCFp32[n0* row], ubCFp32[n0 * row] , scale, -1, (actualBlockShape.n() + 127) / 128 * 2, {1, 1, 8, 8});
+                Muls<float, false>(ubCFp32[n0 * row], ubCFp32[n0 * row], scale, -1, (actualN + 127) / 128 * 2, {1, 1, 8, 8});
         }
         AscendC::PipeBarrier<PIPE_V>();
         AscendC::WaitFlag<AscendC::HardEvent::MTE3_V>(event_id);
@@ -252,8 +256,8 @@ public:
         AscendC::SetFlag<AscendC::HardEvent::V_MTE2>(event_id_2);
         AscendC::SetFlag<AscendC::HardEvent::V_MTE3>(event_id);
 
-        int32_t lenTile = actualBlockShape.m();
-        int32_t stTile = blockCoord.m();
+        int32_t lenTile = static_cast<int32_t>(actualM);
+        int32_t stTile = blockRow;
         int32_t edTile = stTile + lenTile;
         int32_t preSumRankInExpert = 0;
         int32_t tileOffset = 0;
@@ -285,11 +289,11 @@ public:
             AscendC::GlobalTensor<ElementD> gmRemotePeer;
             __gm__ void* dstPeermemPtr = params.shmem(params.offsetD, dstEpIdx);
             gmRemotePeer.SetGlobalBuffer(reinterpret_cast<__gm__ ElementD*>(dstPeermemPtr));
-            MatrixCoord dstOffset{dstOffsetInExpert + dstExpertOffset, blockCoord.n()};
+            auto dstOffset = MakePtoCoord2D(dstOffsetInExpert + dstExpertOffset, blockCol);
             int64_t gmDstOffset = params.layoutC.GetOffset(dstOffset);
             auto gmTileD = gmRemotePeer[gmDstOffset];
             if (dstEpIdx == params.rank) {
-                detail::PtoStoreMatrixRows(gmTileD, ubD[tileOffset * n0], lenData, actualBlockShape.n(), params.n2, n0);
+                detail::PtoStoreMatrixRows(gmTileD, ubD[tileOffset * n0], lenData, actualN, params.n2, n0);
             } else {
                 using ShapeDyn = pto::Shape<pto::DYNAMIC, pto::DYNAMIC, pto::DYNAMIC, pto::DYNAMIC, pto::DYNAMIC>;
                 using StrideDyn = pto::Stride<pto::DYNAMIC, pto::DYNAMIC, pto::DYNAMIC, pto::DYNAMIC, pto::DYNAMIC>;
@@ -301,16 +305,14 @@ public:
                 __gm__ ElementD* localScratch = reinterpret_cast<__gm__ ElementD*>(params.shmem(scratchOffsetBytes, params.rank));
                 AscendC::GlobalTensor<ElementD> gmLocalScratch;
                 gmLocalScratch.SetGlobalBuffer(localScratch);
-                LayoutC layoutScratchRow{1, actualBlockShape.n(), actualBlockShape.n()};
-                LayoutC layoutUbRow{1, actualBlockShape.n(), n0};
-                ShapeDyn rowShape(1, 1, 1, 1, actualBlockShape.n());
-                StrideDyn localStride(actualBlockShape.n(), actualBlockShape.n(), actualBlockShape.n(), actualBlockShape.n(), 1);
+                ShapeDyn rowShape(1, 1, 1, 1, actualN);
+                StrideDyn localStride(actualN, actualN, actualN, actualN, 1);
                 StrideDyn remoteStride(params.n2, params.n2, params.n2, params.n2, 1);
-                TputTile tputTile(1, actualBlockShape.n());
+                TputTile tputTile(1, actualN);
                 __gm__ ElementD* remotePeerBase = reinterpret_cast<__gm__ ElementD*>(dstPeermemPtr) + gmDstOffset;
 
                 for (uint32_t rowIdx = 0; rowIdx < lenData; ++rowIdx) {
-                    detail::PtoStoreVector(gmLocalScratch[0], ubD[(tileOffset + rowIdx) * n0], actualBlockShape.n());
+                    detail::PtoStoreVector(gmLocalScratch[0], ubD[(tileOffset + rowIdx) * n0], actualN);
                     TputGlobal localRowG(localScratch, rowShape, localStride);
                     TputGlobal remoteRowG(remotePeerBase + rowIdx * params.n2, rowShape, remoteStride);
                     pto::comm::TPUT(remoteRowG, localRowG, tputTile);

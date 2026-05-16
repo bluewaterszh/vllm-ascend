@@ -190,7 +190,7 @@ public:
     PTO_DEVICE
     void operator() (
         AscendC::GlobalTensor<ElementC> const &gmC,
-        MatrixCoord const &shapeC,
+        PtoShape2D const &shapeC,
         AscendC::GlobalTensor<ElementPerTokenScale> const &gmPerTokenScale1,
         AscendC::GlobalTensor<ElementD> const &gmD,
         AscendC::GlobalTensor<ElementPerTokenScale> const &gmPerTokenScale2,
@@ -200,8 +200,8 @@ public:
     )
     {
         callback();
-        uint32_t blockM = shapeC.row();
-        uint32_t blockN = shapeC.column();
+        uint32_t blockM = static_cast<uint32_t>(shapeC.shape[0]);
+        uint32_t blockN = static_cast<uint32_t>(shapeC.shape[1]);
 
         uint32_t tileLoops = blockM;
         uint32_t subblockIdx = get_block_idx() + get_subblockid() * get_block_num();

@@ -120,7 +120,7 @@ PTO_DEVICE void StagePerChannelScale(CopyGmToL1S &copyGmToL1S,
                                          layout::VectorLayout const &layoutScale,
                                          uint32_t cols)
 {
-    auto layoutTileS = layoutScale.GetTileLayout(MakeCoord(cols));
+    auto layoutTileS = layoutScale.GetTileLayout(MakePtoCoord1D(cols));
     layout::VectorLayout layoutFpBuf{cols};
     copyGmToL1S(l1STensor, gmBlockS, layoutTileS, layoutTileS);
     AscendC::SetFlag<AscendC::HardEvent::MTE2_FIX>(0);
@@ -275,10 +275,15 @@ public:
     static_assert(L1TileShape::M == L0TileShape::M && L1TileShape::N == L0TileShape::N,
         "The situation where the basic blocks of L1 and L0 differ on the m and n axes is not supported yet");
 
-    static constexpr auto L1A_LAYOUT = LayoutAInL1::template MakeLayout<ElementA>(
-        L1TileShape::M, L1TileShape::K);
-    static constexpr auto L1B_LAYOUT = LayoutBInL1::template MakeLayout<ElementB>(
-        L1TileShape::K, L1TileShape::N);
+    PTO_DEVICE static LayoutAInL1 MakeL1ALayout()
+    {
+        return LayoutAInL1::template MakeLayout<ElementA>(L1TileShape::M, L1TileShape::K);
+    }
+
+    PTO_DEVICE static LayoutBInL1 MakeL1BLayout()
+    {
+        return LayoutBInL1::template MakeLayout<ElementB>(L1TileShape::K, L1TileShape::N);
+    }
 
     PTO_DEVICE
     BlockMmad(Arch::Resource<ArchTag> &resource, __gm__ int32_t* flagPtr = nullptr, int32_t expertPerRank = 0, 
@@ -322,13 +327,16 @@ public:
         AscendC::GlobalTensor<ElementB> const &gmBlockB, LayoutB const &layoutB,
         AscendC::GlobalTensor<ElementC> const &gmBlockC, LayoutC const &layoutC,
         AscendC::GlobalTensor<uint64_t> const &gmBlockS, layout::VectorLayout const &layoutScale,
-        GemmCoord const &actualShape, int32_t syncLoopIdx = -1, int32_t flag = 0
+        PtoShape3D const &actualShape, int32_t syncLoopIdx = -1, int32_t flag = 0
     )
     {
-        uint32_t kTileCount = CeilDiv<L1TileShape::K>(actualShape.k());
+        uint32_t actualM = GetPtoShapeM(actualShape);
+        uint32_t actualN = GetPtoShapeN(actualShape);
+        uint32_t actualK = GetPtoShapeK(actualShape);
+        uint32_t kTileCount = CeilDiv<L1TileShape::K>(actualK);
 
-        uint32_t mRound = RoundUp<L1AAlignHelper::M_ALIGNED>(actualShape.m());
-        uint32_t nRound = RoundUp<L1BAlignHelper::N_ALIGNED>(actualShape.n());
+        uint32_t mRound = RoundUp<L1AAlignHelper::M_ALIGNED>(actualM);
+        uint32_t nRound = RoundUp<L1BAlignHelper::N_ALIGNED>(actualN);
 
         uint32_t startTileIdx = 0;
         if constexpr (ENABLE_SHUFFLE_K) {
@@ -340,22 +348,22 @@ public:
                 (startTileIdx + kLoopIdx) : (startTileIdx + kLoopIdx - kTileCount);
 
             uint32_t kActual = (kTileIdx < kTileCount - 1) ?
-                L1TileShape::K : (actualShape.k() - kTileIdx * L1TileShape::K);
+                L1TileShape::K : (actualK - kTileIdx * L1TileShape::K);
 
             // Emission load instruction from GM to L1
-            MatrixCoord gmTileAOffset{0, kTileIdx * L1TileShape::K};
-            MatrixCoord gmTileBOffset{kTileIdx * L1TileShape::K, 0};
+            auto gmTileAOffset = MakePtoCoord2D(0, kTileIdx * L1TileShape::K);
+            auto gmTileBOffset = MakePtoCoord2D(kTileIdx * L1TileShape::K, 0);
             auto gmTileA = gmBlockA[layoutA.GetOffset(gmTileAOffset)];
             auto gmTileB = gmBlockB[layoutB.GetOffset(gmTileBOffset)];
             // Load first matrix A tile from GM to L1
             AscendC::WaitFlag<AscendC::HardEvent::MTE1_MTE2>(l1AEventList[l1ListId]);
-            auto layoutTileA = layoutA.GetTileLayout(MakeCoord(actualShape.m(), kActual));
-            copyGmToL1A(l1ATensorList[l1ListId], gmTileA, L1A_LAYOUT, layoutTileA);
+            auto layoutTileA = layoutA.GetTileLayout(MakePtoCoord2D(actualM, kActual));
+            copyGmToL1A(l1ATensorList[l1ListId], gmTileA, MakeL1ALayout(), layoutTileA);
             AscendC::SetFlag<AscendC::HardEvent::MTE2_MTE1>(l1AEventList[l1ListId]);
             // Load first matrix B tile from GM to L1
             AscendC::WaitFlag<AscendC::HardEvent::MTE1_MTE2>(l1BEventList[l1ListId]);
-            auto layoutTileB = layoutB.GetTileLayout(MakeCoord(kActual, actualShape.n()));
-            copyGmToL1B(l1BTensorList[l1ListId], gmTileB, L1B_LAYOUT, layoutTileB);
+            auto layoutTileB = layoutB.GetTileLayout(MakePtoCoord2D(kActual, actualN));
+            copyGmToL1B(l1BTensorList[l1ListId], gmTileB, MakeL1BLayout(), layoutTileB);
             AscendC::SetFlag<AscendC::HardEvent::MTE2_MTE1>(l1BEventList[l1ListId]);
 
             // If the number of preload instructions reaches the upper limit, perform an mmad calculation on L1 tile
@@ -377,7 +385,7 @@ public:
             if (kLoopIdx == kTileCount - 1) {
                 l1TileMmadParams.gmBlockC = gmBlockC;
                 l1TileMmadParams.gmBlockS = gmBlockS;
-                l1TileMmadParams.layoutCInGm = layoutC.GetTileLayout(actualShape.GetCoordMN());
+                l1TileMmadParams.layoutCInGm = layoutC.GetTileLayout(GetPtoShapeMN(actualShape));
                 l1TileMmadParams.layoutScale = layoutScale;
                 l1TileMmadParams.syncLoopIdx = syncLoopIdx;
             }
@@ -520,7 +528,7 @@ private:
         auto &l1BTensor = l1BTensorList[params.l1ListId];
 
         auto &l0CTensor = l0CTensorList[l0CListId];
-        LayoutCInL0 layoutCInL0 = LayoutCInL0::MakeLayoutInL0C(MakeCoord(params.mRound, params.nRound));
+        LayoutCInL0 layoutCInL0 = LayoutCInL0::MakeLayoutInL0C(MakePtoCoord2D(params.mRound, params.nRound));
 
         if constexpr (!ENABLE_UNIT_FLAG) {
             if (params.isKLoopFirst) {
@@ -538,14 +546,14 @@ private:
 
                 auto &l0ATile = l0ATensorList[l0AListId];
                 auto layoutAInL0 = LayoutAInL0::template MakeLayout<ElementA>(mPartActual, kPartActual);
-                auto l1AOffset = MakeCoord(mPartIdx, kPartIdx) * L0TileShape::ToCoordMK();
-                auto l1ATile = l1ATensor[L1A_LAYOUT.GetOffset(l1AOffset)];
+                auto l1AOffset = MulPtoCoord2D(MakePtoCoord2D(mPartIdx, kPartIdx), L0TileShape::ToPtoShapeMK());
+                auto l1ATile = l1ATensor[MakeL1ALayout().GetOffset(l1AOffset)];
 
                 AscendC::WaitFlag<AscendC::HardEvent::M_MTE1>(l0AEventList[l0AListId]);
                 if ((mPartIdx == 0) && (kPartIdx == 0)) {
                     AscendC::WaitFlag<AscendC::HardEvent::MTE2_MTE1>(l1AEventList[params.l1ListId]);
                 }
-                copyL1ToL0A(l0ATile, l1ATile, layoutAInL0, L1A_LAYOUT);
+                copyL1ToL0A(l0ATile, l1ATile, layoutAInL0, MakeL1ALayout());
                 if ((mPartIdx == mPartLoop - 1) && (kPartIdx == kPartLoop - 1)) {
                     AscendC::SetFlag<AscendC::HardEvent::MTE1_MTE2>(l1AEventList[params.l1ListId]);
                 }
@@ -556,21 +564,21 @@ private:
 
                     auto &l0BTile = l0BTensorList[l0BListId];
                     auto layoutBInL0 = LayoutBInL0::template MakeLayout<ElementB>(kPartActual, nPartActual);
-                    auto l1BOffset = MakeCoord(kPartIdx, nPartIdx) * L0TileShape::ToCoordKN();
-                    auto l1BTile = l1BTensor[L1B_LAYOUT.GetOffset(l1BOffset)];
+                    auto l1BOffset = MulPtoCoord2D(MakePtoCoord2D(kPartIdx, nPartIdx), L0TileShape::ToPtoShapeKN());
+                    auto l1BTile = l1BTensor[MakeL1BLayout().GetOffset(l1BOffset)];
 
                     AscendC::WaitFlag<AscendC::HardEvent::M_MTE1>(l0BEventList[l0BListId]);
                     if ((kPartIdx == 0) && (nPartIdx == 0)) {
                         AscendC::WaitFlag<AscendC::HardEvent::MTE2_MTE1>(l1BEventList[params.l1ListId]);
                     }
-                    copyL1ToL0B(l0BTile, l1BTile, layoutBInL0, L1B_LAYOUT);
+                    copyL1ToL0B(l0BTile, l1BTile, layoutBInL0, MakeL1BLayout());
                     if ((kPartIdx == kPartLoop - 1) && (nPartIdx == nPartLoop - 1)) {
                         AscendC::SetFlag<AscendC::HardEvent::MTE1_MTE2>(l1BEventList[params.l1ListId]);
                     }
 
                     AscendC::SetFlag<AscendC::HardEvent::MTE1_M>(EVENT_ID0);
 
-                    auto l0COffset = MakeCoord(mPartIdx, nPartIdx) * L0TileShape::ToCoordMN();
+                    auto l0COffset = MulPtoCoord2D(MakePtoCoord2D(mPartIdx, nPartIdx), L0TileShape::ToPtoShapeMN());
                     auto l0CTile = l0CTensor[layoutCInL0.GetOffset(l0COffset)];
 
                     AscendC::WaitFlag<AscendC::HardEvent::MTE1_M>(EVENT_ID0);

@@ -186,7 +186,7 @@ public:
     PTO_DEVICE
     void operator() (
         AscendC::GlobalTensor<ElementC> const &gmC,
-        MatrixCoord const &shapeC,
+        PtoShape2D const &shapeC,
         AscendC::GlobalTensor<ElementPerTokenScale> const &gmPerTokenScale,
         __gm__ ElementD* ptrD,
         int32_t dstRank
@@ -197,8 +197,8 @@ public:
         using TputGlobal = pto::GlobalTensor<ElementD, ShapeDyn, StrideDyn, pto::Layout::ND>;
         using TputTile = pto::Tile<pto::TileType::Vec, ElementD, 1, 1024, pto::BLayout::RowMajor, -1, -1>;
 
-        uint32_t blockM = shapeC.row();
-        uint32_t blockN = shapeC.column();
+        uint32_t blockM = static_cast<uint32_t>(shapeC.shape[0]);
+        uint32_t blockN = static_cast<uint32_t>(shapeC.shape[1]);
         uint32_t tileLoops = blockM;
         constexpr uint32_t scratchCols = 1024;
         int32_t logicalSubCoreIdx = get_block_idx() + get_subblockid() * get_block_num();

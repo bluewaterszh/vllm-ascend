@@ -40,29 +40,6 @@ FORCE_INLINE_AICORE void gm_dcci(__gm__ T *addr)
     __asm__ __volatile__("");
 }
 
-FORCE_INLINE_AICORE void pto_signal_notify_add(__gm__ int32_t *sig_addr, int32_t value = 1)
-{
-    pto::comm::Signal sig(sig_addr);
-    pto::comm::TNOTIFY(sig, value, pto::comm::NotifyOp::AtomicAdd);
-}
-
-FORCE_INLINE_AICORE void pto_signal_wait_ge(__gm__ int32_t *sig_addr, int32_t cmp_val)
-{
-    pto::comm::Signal sig(sig_addr);
-    pto::comm::TWAIT(sig, cmp_val, pto::comm::WaitCmp::GE);
-}
-
-FORCE_INLINE_AICORE int32_t gm_signal_wait_until_eq_for_barrier(__gm__ int32_t *sig_addr, int32_t cmp_val)
-{
-    pto_signal_wait_ge(sig_addr, cmp_val);
-    return cmp_val;
-}
-
-FORCE_INLINE_AICORE void gm_signal_wait_until_ne(__gm__ int32_t *sig_addr, int32_t cmp_val)
-{
-    pto_signal_wait_ge(sig_addr, cmp_val + 1);
-}
-
 class HcclShmem {
 public:
     FORCE_INLINE_AICORE HcclShmem() { segmentBytes_ = SHMEM_MEM; }
@@ -126,12 +103,14 @@ public:
     {
         AscendC::PipeBarrier<PIPE_ALL>();
         dsb(DSB_DDR);
-        pto_signal_notify_add(RemoteTokenReadyCounter(rankId, rank_));
+        auto remoteTokenReady = RemoteTokenReadySignal(rankId, rank_);
+        pto::comm::TNOTIFY(remoteTokenReady, 1, pto::comm::NotifyOp::AtomicAdd);
     }
 
     FORCE_INLINE_AICORE void WaitTokenReady(int32_t srcRank)
     {
-        gm_signal_wait_until_ne(LocalTokenReadyCounter(srcRank), 0);
+        auto localTokenReady = LocalTokenReadySignal(srcRank);
+        pto::comm::TWAIT(localTokenReady, 1, pto::comm::WaitCmp::GE);
     }
 
     FORCE_INLINE_AICORE void CrossRankSync()
@@ -143,9 +122,10 @@ public:
         AscendC::PipeBarrier<PIPE_ALL>();
         dsb(DSB_DDR);
         for (int i = vec_id; i < rankSize_; i += vec_size) {
-            pto_signal_notify_add(RemoteBarrierCounter(i, rank_));
-            auto sync_check = LocalBarrierCounter(i);
-            gm_signal_wait_until_eq_for_barrier(sync_check, count);
+            auto remoteBarrier = RemoteBarrierSignal(i, rank_);
+            auto localBarrier = LocalBarrierSignal(i);
+            pto::comm::TNOTIFY(remoteBarrier, 1, pto::comm::NotifyOp::AtomicAdd);
+            pto::comm::TWAIT(localBarrier, count, pto::comm::WaitCmp::GE);
         }
 
         AscendC::SyncAll<true>();
@@ -188,14 +168,34 @@ private:
         return LocalSignalBase() + BARRIER_EPOCH_INDEX;
     }
 
+    FORCE_INLINE_AICORE pto::comm::Signal LocalBarrierSignal(int32_t srcRank) const
+    {
+        return pto::comm::Signal(LocalBarrierCounter(srcRank));
+    }
+
+    FORCE_INLINE_AICORE pto::comm::Signal RemoteBarrierSignal(int32_t rankId, int32_t srcRank) const
+    {
+        return pto::comm::Signal(RemoteBarrierCounter(rankId, srcRank));
+    }
+
     FORCE_INLINE_AICORE __gm__ int32_t *LocalTokenReadyCounter(int32_t srcRank) const
     {
         return LocalSignalBase() + TOKEN_READY_BASE_INDEX + srcRank * TOKEN_READY_STRIDE;
     }
 
+    FORCE_INLINE_AICORE pto::comm::Signal LocalTokenReadySignal(int32_t srcRank) const
+    {
+        return pto::comm::Signal(LocalTokenReadyCounter(srcRank));
+    }
+
     FORCE_INLINE_AICORE __gm__ int32_t *RemoteTokenReadyCounter(int32_t rankId, int32_t srcRank) const
     {
         return RemoteSignalBase(rankId) + TOKEN_READY_BASE_INDEX + srcRank * TOKEN_READY_STRIDE;
+    }
+
+    FORCE_INLINE_AICORE pto::comm::Signal RemoteTokenReadySignal(int32_t rankId, int32_t srcRank) const
+    {
+        return pto::comm::Signal(RemoteTokenReadyCounter(rankId, srcRank));
     }
 
     __gm__ HcclDeviceContext *hcclCtx_ = nullptr;

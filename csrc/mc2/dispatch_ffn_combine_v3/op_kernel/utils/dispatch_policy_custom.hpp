@@ -3,6 +3,8 @@
 
 #include "kernel_operator.h"
 
+#include <pto/common/pto_tile.hpp>
+
 #include <algorithm>
 #include <cstdint>
 #include <type_traits>
@@ -30,6 +32,72 @@ constexpr uint32_t BYTE_PER_VECTOR_FRACTAL = BYTE_PER_BLK * BLK_NUM_PER_VECTOR_F
 constexpr uint64_t L2_OFFSET = 0;
 constexpr uint32_t STRIDE_LIMIT = 65536;
 constexpr uint32_t BYTE_PER_BLK_FP = 128;
+
+using PtoShape1D = pto::Shape<pto::DYNAMIC, 1, 1, 1, 1>;
+using PtoShape2D = pto::Shape<pto::DYNAMIC, pto::DYNAMIC, 1, 1, 1>;
+using PtoShape3D = pto::Shape<pto::DYNAMIC, pto::DYNAMIC, pto::DYNAMIC, 1, 1>;
+using PtoShape4D = pto::Shape<pto::DYNAMIC, pto::DYNAMIC, pto::DYNAMIC, pto::DYNAMIC, 1>;
+using PtoStride1D = pto::Stride<pto::DYNAMIC, 1, 1, 1, 1>;
+using PtoStride2D = pto::Stride<pto::DYNAMIC, pto::DYNAMIC, 1, 1, 1>;
+using PtoStride4D = pto::Stride<pto::DYNAMIC, pto::DYNAMIC, pto::DYNAMIC, pto::DYNAMIC, 1>;
+using PtoCoord1D = PtoShape1D;
+using PtoCoord2D = PtoShape2D;
+using PtoCoord3D = PtoShape3D;
+
+PTO_HOST_DEVICE PtoCoord1D MakePtoCoord1D(int64_t dim0)
+{
+    return PtoCoord1D(dim0);
+}
+
+PTO_HOST_DEVICE PtoCoord2D MakePtoCoord2D(int64_t dim0, int64_t dim1)
+{
+    return PtoCoord2D(dim0, dim1);
+}
+
+PTO_HOST_DEVICE PtoCoord3D MakePtoCoord3D(int64_t dim0, int64_t dim1, int64_t dim2)
+{
+    return PtoCoord3D(dim0, dim1, dim2);
+}
+
+PTO_HOST_DEVICE PtoShape3D MakePtoShape3D(int64_t dim0, int64_t dim1, int64_t dim2)
+{
+    return PtoShape3D(dim0, dim1, dim2);
+}
+
+PTO_HOST_DEVICE PtoCoord2D MulPtoCoord2D(PtoCoord2D const &lhs, PtoCoord2D const &rhs)
+{
+    return PtoCoord2D(lhs.shape[0] * rhs.shape[0], lhs.shape[1] * rhs.shape[1]);
+}
+
+PTO_HOST_DEVICE uint32_t GetPtoShapeM(PtoShape3D const &shape)
+{
+    return static_cast<uint32_t>(shape.shape[0]);
+}
+
+PTO_HOST_DEVICE uint32_t GetPtoShapeN(PtoShape3D const &shape)
+{
+    return static_cast<uint32_t>(shape.shape[1]);
+}
+
+PTO_HOST_DEVICE uint32_t GetPtoShapeK(PtoShape3D const &shape)
+{
+    return static_cast<uint32_t>(shape.shape[2]);
+}
+
+PTO_HOST_DEVICE PtoShape2D GetPtoShapeMN(PtoShape3D const &shape)
+{
+    return PtoShape2D(shape.shape[0], shape.shape[1]);
+}
+
+PTO_HOST_DEVICE PtoShape2D GetPtoShapeMK(PtoShape3D const &shape)
+{
+    return PtoShape2D(shape.shape[0], shape.shape[2]);
+}
+
+PTO_HOST_DEVICE PtoShape2D GetPtoShapeKN(PtoShape3D const &shape)
+{
+    return PtoShape2D(shape.shape[2], shape.shape[1]);
+}
 
 class EmptyClass {};
 
@@ -226,6 +294,11 @@ struct MatrixShape {
     {
         return MakeCoord(ROW, COLUMN);
     }
+
+    PTO_HOST_DEVICE static PtoShape2D ToPtoShape()
+    {
+        return PtoShape2D(ROW, COLUMN);
+    }
 };
 
 struct MatrixCoord : public Coord<2, uint32_t> {
@@ -257,11 +330,23 @@ struct MatrixCoord : public Coord<2, uint32_t> {
         Base::operator+=(b);
         return *this;
     }
+
+    PTO_HOST_DEVICE PtoShape2D ToPtoShape() const
+    {
+        return PtoShape2D(row(), column());
+    }
 };
 
 PTO_HOST_DEVICE MatrixCoord CeilDiv(MatrixCoord const &lhs, MatrixCoord const &rhs)
 {
     return MatrixCoord(pto_ext::CeilDiv(lhs.row(), rhs.row()), pto_ext::CeilDiv(lhs.column(), rhs.column()));
+}
+
+PTO_HOST_DEVICE PtoShape2D CeilDiv(PtoShape2D const &lhs, PtoShape2D const &rhs)
+{
+    return PtoShape2D(
+        pto_ext::CeilDiv(lhs.shape[0], rhs.shape[0]),
+        pto_ext::CeilDiv(lhs.shape[1], rhs.shape[1]));
 }
 
 template <uint32_t M_ = 1, uint32_t N_ = 1, uint32_t K_ = 1>
@@ -279,57 +364,35 @@ struct GemmShape {
     PTO_HOST_DEVICE static Coord<2> ToCoordMN() { return MakeCoord(M, N); }
     PTO_HOST_DEVICE static Coord<2> ToCoordMK() { return MakeCoord(M, K); }
     PTO_HOST_DEVICE static Coord<2> ToCoordKN() { return MakeCoord(K, N); }
+    PTO_HOST_DEVICE static PtoShape3D ToPtoShape() { return PtoShape3D(M, N, K); }
+    PTO_HOST_DEVICE static PtoShape2D ToPtoShapeMN() { return PtoShape2D(M, N); }
+    PTO_HOST_DEVICE static PtoShape2D ToPtoShapeMK() { return PtoShape2D(M, K); }
+    PTO_HOST_DEVICE static PtoShape2D ToPtoShapeKN() { return PtoShape2D(K, N); }
 };
 
-struct GemmCoord : public Coord<3, uint32_t> {
-    using Index = uint32_t;
-    using Base = Coord<3, Index>;
 
-    static constexpr int M_INDEX = 0;
-    static constexpr int N_INDEX = 1;
-    static constexpr int K_INDEX = 2;
-
-    PTO_HOST_DEVICE GemmCoord() = default;
-    PTO_HOST_DEVICE GemmCoord(Coord<3, Index> const &coord) : Base(coord) {}
-    PTO_HOST_DEVICE GemmCoord(Index m, Index n, Index k) : Base(MakeCoord(m, n, k)) {}
-
-    PTO_HOST_DEVICE Index const &m() const { return this->At(M_INDEX); }
-    PTO_HOST_DEVICE Index &m() { return this->At(M_INDEX); }
-    PTO_HOST_DEVICE Index const &n() const { return this->At(N_INDEX); }
-    PTO_HOST_DEVICE Index &n() { return this->At(N_INDEX); }
-    PTO_HOST_DEVICE Index const &k() const { return this->At(K_INDEX); }
-    PTO_HOST_DEVICE Index &k() { return this->At(K_INDEX); }
-
-    PTO_HOST_DEVICE auto GetCoordMN() const { return this->template GetCoordByAxis<M_INDEX, N_INDEX>(); }
-    PTO_HOST_DEVICE auto GetCoordMK() const { return this->template GetCoordByAxis<M_INDEX, K_INDEX>(); }
-    PTO_HOST_DEVICE auto GetCoordKN() const { return this->template GetCoordByAxis<K_INDEX, N_INDEX>(); }
-};
-
-PTO_HOST_DEVICE GemmCoord CeilDiv(GemmCoord const &lhs, GemmCoord const &rhs)
-{
-    return GemmCoord(
-        pto_ext::CeilDiv(lhs.m(), rhs.m()),
-        pto_ext::CeilDiv(lhs.n(), rhs.n()),
-        pto_ext::CeilDiv(lhs.k(), rhs.k()));
-}
 
 namespace layout {
 
 struct ND {
     static constexpr int RANK = 2;
+    static constexpr pto::Layout kPtoLayout = pto::Layout::ND;
+    static constexpr pto::TileLayoutCustom kTileLayout = pto::TileLayoutCustom::ND;
+    static constexpr pto::BLayout kBLayout = pto::BLayout::RowMajor;
+    static constexpr pto::SLayout kSLayout = pto::SLayout::NoneBox;
     using Index = uint32_t;
     using LongIndex = int64_t;
-    using Shape = Coord<RANK, Index>;
-    using Stride = Coord<RANK, LongIndex>;
+    using Shape = PtoShape2D;
+    using Stride = PtoStride2D;
 
     Shape shape_{};
     Stride stride_{};
 
     PTO_HOST_DEVICE ND(Index rows = 0, Index cols = 0)
-        : shape_(MakeCoord(rows, cols)), stride_(MakeCoord(LongIndex(cols), LongIndex(1))) {}
+        : shape_(rows, cols), stride_(LongIndex(cols), LongIndex(1)) {}
 
     PTO_HOST_DEVICE ND(Index rows, Index cols, LongIndex ldm)
-        : shape_(MakeCoord(rows, cols)), stride_(MakeCoord(ldm, LongIndex(1))) {}
+        : shape_(rows, cols), stride_(ldm, LongIndex(1)) {}
 
     PTO_HOST_DEVICE ND(Shape shape, Stride stride) : shape_(shape), stride_(stride) {}
 
@@ -341,39 +404,53 @@ struct ND {
 
     PTO_HOST_DEVICE LongIndex GetOffset(MatrixCoord const &coord) const
     {
-        return LongIndex(coord.row()) * stride_[0] + LongIndex(coord.column());
+        return LongIndex(coord.row()) * stride_.stride[0] + LongIndex(coord.column());
+    }
+
+    PTO_HOST_DEVICE LongIndex GetOffset(PtoCoord2D const &coord) const
+    {
+        return LongIndex(coord.shape[0]) * stride_.stride[0] + LongIndex(coord.shape[1]);
     }
 
     PTO_HOST_DEVICE ND GetTileLayout(MatrixCoord const &tileShape) const
+    {
+        return ND(tileShape.ToPtoShape(), stride());
+    }
+
+    PTO_HOST_DEVICE ND GetTileLayout(PtoShape2D const &tileShape) const
     {
         return ND(tileShape, stride());
     }
 
     PTO_HOST_DEVICE Shape shape() const { return shape_; }
     PTO_HOST_DEVICE Shape &shape() { return shape_; }
-    PTO_HOST_DEVICE typename Shape::Index shape(int idx) const { return shape_[idx]; }
-    PTO_HOST_DEVICE typename Shape::Index &shape(int idx) { return shape_[idx]; }
+    PTO_HOST_DEVICE int64_t shape(int idx) const { return shape_.shape[idx]; }
+    PTO_HOST_DEVICE int64_t &shape(int idx) { return shape_.shape[idx]; }
     PTO_HOST_DEVICE Stride stride() const { return stride_; }
     PTO_HOST_DEVICE Stride &stride() { return stride_; }
-    PTO_HOST_DEVICE typename Stride::Index stride(int idx) const { return stride_[idx]; }
-    PTO_HOST_DEVICE typename Stride::Index &stride(int idx) { return stride_[idx]; }
+    PTO_HOST_DEVICE int64_t stride(int idx) const { return stride_.stride[idx]; }
+    PTO_HOST_DEVICE int64_t &stride(int idx) { return stride_.stride[idx]; }
 };
 
 struct DN {
     static constexpr int RANK = 2;
+    static constexpr pto::Layout kPtoLayout = pto::Layout::DN;
+    static constexpr pto::TileLayoutCustom kTileLayout = pto::TileLayoutCustom::DN;
+    static constexpr pto::BLayout kBLayout = pto::BLayout::ColMajor;
+    static constexpr pto::SLayout kSLayout = pto::SLayout::NoneBox;
     using Index = uint32_t;
     using LongIndex = int64_t;
-    using Shape = Coord<RANK, Index>;
-    using Stride = Coord<RANK, LongIndex>;
+    using Shape = PtoShape2D;
+    using Stride = PtoStride2D;
 
     Shape shape_{};
     Stride stride_{};
 
     PTO_HOST_DEVICE DN(Index rows = 0, Index cols = 0)
-        : shape_(MakeCoord(rows, cols)), stride_(MakeCoord(LongIndex(1), LongIndex(rows))) {}
+        : shape_(rows, cols), stride_(LongIndex(1), LongIndex(rows)) {}
 
     PTO_HOST_DEVICE DN(Index rows, Index cols, LongIndex ldm)
-        : shape_(MakeCoord(rows, cols)), stride_(MakeCoord(LongIndex(1), ldm)) {}
+        : shape_(rows, cols), stride_(LongIndex(1), ldm) {}
 
     PTO_HOST_DEVICE DN(Shape shape, Stride stride) : shape_(shape), stride_(stride) {}
 
@@ -385,74 +462,101 @@ struct DN {
 
     PTO_HOST_DEVICE LongIndex GetOffset(MatrixCoord const &coord) const
     {
-        return LongIndex(coord.row()) + LongIndex(coord.column()) * stride_[1];
+        return LongIndex(coord.row()) + LongIndex(coord.column()) * stride_.stride[1];
+    }
+
+    PTO_HOST_DEVICE LongIndex GetOffset(PtoCoord2D const &coord) const
+    {
+        return LongIndex(coord.shape[0]) + LongIndex(coord.shape[1]) * stride_.stride[1];
     }
 
     PTO_HOST_DEVICE DN GetTileLayout(MatrixCoord const &tileShape) const
+    {
+        return DN(tileShape.ToPtoShape(), stride());
+    }
+
+    PTO_HOST_DEVICE DN GetTileLayout(PtoShape2D const &tileShape) const
     {
         return DN(tileShape, stride());
     }
 
     PTO_HOST_DEVICE Shape shape() const { return shape_; }
     PTO_HOST_DEVICE Shape &shape() { return shape_; }
-    PTO_HOST_DEVICE typename Shape::Index shape(int idx) const { return shape_[idx]; }
-    PTO_HOST_DEVICE typename Shape::Index &shape(int idx) { return shape_[idx]; }
+    PTO_HOST_DEVICE int64_t shape(int idx) const { return shape_.shape[idx]; }
+    PTO_HOST_DEVICE int64_t &shape(int idx) { return shape_.shape[idx]; }
     PTO_HOST_DEVICE Stride stride() const { return stride_; }
     PTO_HOST_DEVICE Stride &stride() { return stride_; }
-    PTO_HOST_DEVICE typename Stride::Index stride(int idx) const { return stride_[idx]; }
-    PTO_HOST_DEVICE typename Stride::Index &stride(int idx) { return stride_[idx]; }
+    PTO_HOST_DEVICE int64_t stride(int idx) const { return stride_.stride[idx]; }
+    PTO_HOST_DEVICE int64_t &stride(int idx) { return stride_.stride[idx]; }
 };
 
 struct VectorLayout {
     static constexpr int RANK = 1;
+    static constexpr pto::Layout kPtoLayout = pto::Layout::SCALE;
+    static constexpr pto::TileLayoutCustom kTileLayout = pto::TileLayoutCustom::NONE;
+    static constexpr pto::BLayout kBLayout = pto::BLayout::RowMajor;
+    static constexpr pto::SLayout kSLayout = pto::SLayout::NoneBox;
     using Index = uint32_t;
     using LongIndex = int64_t;
-    using Shape = Coord<RANK, Index>;
-    using Stride = Coord<RANK, LongIndex>;
+    using Shape = PtoShape1D;
+    using Stride = PtoStride1D;
     using TensorCoord = Coord<RANK, Index>;
 
     Shape shape_{};
     Stride stride_{};
 
     PTO_HOST_DEVICE VectorLayout(Index size = 0)
-        : shape_(MakeCoord(size)), stride_(MakeCoord(LongIndex(1))) {}
+        : shape_(size), stride_(LongIndex(1)) {}
 
     PTO_HOST_DEVICE VectorLayout(Shape shape, Stride stride) : shape_(shape), stride_(stride) {}
 
     PTO_HOST_DEVICE LongIndex GetOffset(TensorCoord const &coord) const
     {
-        return stride_[0] * coord[0];
+        return stride_.stride[0] * coord[0];
+    }
+
+    PTO_HOST_DEVICE LongIndex GetOffset(PtoCoord1D const &coord) const
+    {
+        return stride_.stride[0] * coord.shape[0];
     }
 
     PTO_HOST_DEVICE VectorLayout GetTileLayout(TensorCoord const &tileShape) const
+    {
+        return VectorLayout(Shape(tileShape[0]), stride());
+    }
+
+    PTO_HOST_DEVICE VectorLayout GetTileLayout(PtoShape1D const &tileShape) const
     {
         return VectorLayout(tileShape, stride());
     }
 
     PTO_HOST_DEVICE Shape shape() const { return shape_; }
     PTO_HOST_DEVICE Shape &shape() { return shape_; }
-    PTO_HOST_DEVICE typename Shape::Index shape(int idx) const { return shape_[idx]; }
-    PTO_HOST_DEVICE typename Shape::Index &shape(int idx) { return shape_[idx]; }
+    PTO_HOST_DEVICE int64_t shape(int idx) const { return shape_.shape[idx]; }
+    PTO_HOST_DEVICE int64_t &shape(int idx) { return shape_.shape[idx]; }
     PTO_HOST_DEVICE Stride stride() const { return stride_; }
     PTO_HOST_DEVICE Stride &stride() { return stride_; }
-    PTO_HOST_DEVICE typename Stride::Index stride(int idx) const { return stride_[idx]; }
-    PTO_HOST_DEVICE typename Stride::Index &stride(int idx) { return stride_[idx]; }
+    PTO_HOST_DEVICE int64_t stride(int idx) const { return stride_.stride[idx]; }
+    PTO_HOST_DEVICE int64_t &stride(int idx) { return stride_.stride[idx]; }
 };
 
 struct Nz {
     static constexpr int RANK = 4;
+    static constexpr pto::TileLayoutCustom kTileLayout = pto::TileLayoutCustom::NZ;
+    static constexpr pto::BLayout kBLayout = pto::BLayout::ColMajor;
+    static constexpr pto::SLayout kSLayout = pto::SLayout::RowMajor;
     using Index = uint32_t;
     using LongIndex = int64_t;
     static constexpr int ORG_SHAPE_RANK = 2;
-    using OrgShape = Coord<ORG_SHAPE_RANK, Index>;
-    using Shape = Coord<RANK, Index>;
-    using Stride = Coord<RANK, LongIndex>;
+    using OrgShape = PtoShape2D;
+    using Shape = PtoShape4D;
+    using Stride = PtoStride4D;
 
     OrgShape orgShape_{};
     Shape shape_{};
     Stride stride_{};
 
-    PTO_HOST_DEVICE constexpr Nz(
+    PTO_HOST_DEVICE Nz(
         Index orgRows = 0,
         Index orgCols = 0,
         Index rowsInFractal = 0,
@@ -463,15 +567,15 @@ struct Nz {
         LongIndex strideRowsByFractal = 0,
         LongIndex strideColsInFractal = 0,
         LongIndex strideColsByFractal = 0)
-        : orgShape_(MakeCoord(orgRows, orgCols)),
-          shape_(MakeCoord(rowsInFractal, rowsByFractal, colsInFractal, colsByFractal)),
-          stride_(MakeCoord(strideRowsInFractal, strideRowsByFractal, strideColsInFractal, strideColsByFractal)) {}
+        : orgShape_(orgRows, orgCols),
+          shape_(rowsInFractal, rowsByFractal, colsInFractal, colsByFractal),
+          stride_(strideRowsInFractal, strideRowsByFractal, strideColsInFractal, strideColsByFractal) {}
 
-    PTO_HOST_DEVICE constexpr Nz(OrgShape orgShape, Shape shape, Stride stride)
+    PTO_HOST_DEVICE Nz(OrgShape orgShape, Shape shape, Stride stride)
         : orgShape_(orgShape), shape_(shape), stride_(stride) {}
 
     template <class Element>
-    PTO_HOST_DEVICE static constexpr Nz MakeLayout(Index orgRows, Index orgCols)
+    PTO_HOST_DEVICE static Nz MakeLayout(Index orgRows, Index orgCols)
     {
         constexpr uint32_t ELE_NUM_PER_C0 = BYTE_PER_C0 / sizeof(Element);
         Index rowsRound = RoundUp<ELE_NUM_PER_C0>(orgRows);
@@ -490,58 +594,80 @@ struct Nz {
 
     PTO_HOST_DEVICE LongIndex GetOffset(MatrixCoord const &coord) const
     {
-        return LongIndex(coord.row()) / shape_[0] * stride_[1] + LongIndex(coord.column()) / shape_[2] * stride_[3] +
-            (LongIndex(coord.row()) % shape_[0]) * stride_[0] + (LongIndex(coord.column()) % shape_[2]) * stride_[2];
+        return LongIndex(coord.row()) / shape_.shape[0] * stride_.stride[1] +
+            LongIndex(coord.column()) / shape_.shape[2] * stride_.stride[3] +
+            (LongIndex(coord.row()) % shape_.shape[0]) * stride_.stride[0] +
+            (LongIndex(coord.column()) % shape_.shape[2]) * stride_.stride[2];
+    }
+
+    PTO_HOST_DEVICE LongIndex GetOffset(PtoCoord2D const &coord) const
+    {
+        return LongIndex(coord.shape[0]) / shape_.shape[0] * stride_.stride[1] +
+            LongIndex(coord.shape[1]) / shape_.shape[2] * stride_.stride[3] +
+            (LongIndex(coord.shape[0]) % shape_.shape[0]) * stride_.stride[0] +
+            (LongIndex(coord.shape[1]) % shape_.shape[2]) * stride_.stride[2];
     }
 
     PTO_HOST_DEVICE Nz GetTileLayout(MatrixCoord const &tileOriShape) const
     {
-        auto tileShape = MakeCoord(
-            shape(0), CeilDiv(tileOriShape.row(), shape(0)),
-            shape(2), CeilDiv(tileOriShape.column(), shape(2)));
+        Shape tileShape(shape(0), CeilDiv(tileOriShape.row(), shape(0)), shape(2), CeilDiv(tileOriShape.column(), shape(2)));
+        return Nz(tileOriShape.ToPtoShape(), tileShape, stride());
+    }
+
+    PTO_HOST_DEVICE Nz GetTileLayout(PtoShape2D const &tileOriShape) const
+    {
+        Shape tileShape(shape(0), CeilDiv(tileOriShape.shape[0], shape(0)), shape(2), CeilDiv(tileOriShape.shape[1], shape(2)));
         return Nz(tileOriShape, tileShape, stride());
     }
 
     PTO_HOST_DEVICE static Nz MakeLayoutInL0C(MatrixCoord const &shape)
     {
-        return Nz(shape.row(),
-                  shape.column(),
+        return MakeLayoutInL0C(shape.ToPtoShape());
+    }
+
+    PTO_HOST_DEVICE static Nz MakeLayoutInL0C(PtoShape2D const &shape)
+    {
+        return Nz(shape.shape[0],
+                  shape.shape[1],
                   C0_NUM_PER_FRACTAL,
-                  CeilDiv<C0_NUM_PER_FRACTAL>(shape.row()),
+                  CeilDiv<C0_NUM_PER_FRACTAL>(shape.shape[0]),
                   C0_NUM_PER_FRACTAL,
-                  CeilDiv<C0_NUM_PER_FRACTAL>(shape.column()),
+                  CeilDiv<C0_NUM_PER_FRACTAL>(shape.shape[1]),
                   C0_NUM_PER_FRACTAL,
                   C0_NUM_PER_FRACTAL * C0_NUM_PER_FRACTAL,
                   1,
-                  RoundUp<C0_NUM_PER_FRACTAL>(shape.row()) * C0_NUM_PER_FRACTAL);
+                  RoundUp<C0_NUM_PER_FRACTAL>(shape.shape[0]) * C0_NUM_PER_FRACTAL);
     }
 
-    PTO_HOST_DEVICE typename OrgShape::Index orgShape(int idx) const { return orgShape_[idx]; }
-    PTO_HOST_DEVICE typename OrgShape::Index &orgShape(int idx) { return orgShape_[idx]; }
+    PTO_HOST_DEVICE int64_t orgShape(int idx) const { return orgShape_.shape[idx]; }
+    PTO_HOST_DEVICE int64_t &orgShape(int idx) { return orgShape_.shape[idx]; }
     PTO_HOST_DEVICE Shape shape() const { return shape_; }
     PTO_HOST_DEVICE Shape &shape() { return shape_; }
-    PTO_HOST_DEVICE typename Shape::Index shape(int idx) const { return shape_[idx]; }
-    PTO_HOST_DEVICE typename Shape::Index &shape(int idx) { return shape_[idx]; }
+    PTO_HOST_DEVICE int64_t shape(int idx) const { return shape_.shape[idx]; }
+    PTO_HOST_DEVICE int64_t &shape(int idx) { return shape_.shape[idx]; }
     PTO_HOST_DEVICE Stride stride() const { return stride_; }
     PTO_HOST_DEVICE Stride &stride() { return stride_; }
-    PTO_HOST_DEVICE typename Stride::Index stride(int idx) const { return stride_[idx]; }
-    PTO_HOST_DEVICE typename Stride::Index &stride(int idx) { return stride_[idx]; }
+    PTO_HOST_DEVICE int64_t stride(int idx) const { return stride_.stride[idx]; }
+    PTO_HOST_DEVICE int64_t &stride(int idx) { return stride_.stride[idx]; }
 };
 
 struct Zn {
     static constexpr int RANK = 4;
+    static constexpr pto::TileLayoutCustom kTileLayout = pto::TileLayoutCustom::ZN;
+    static constexpr pto::BLayout kBLayout = pto::BLayout::RowMajor;
+    static constexpr pto::SLayout kSLayout = pto::SLayout::ColMajor;
     using Index = uint32_t;
     using LongIndex = int64_t;
     static constexpr int ORG_SHAPE_RANK = 2;
-    using OrgShape = Coord<ORG_SHAPE_RANK, Index>;
-    using Shape = Coord<RANK, Index>;
-    using Stride = Coord<RANK, LongIndex>;
+    using OrgShape = PtoShape2D;
+    using Shape = PtoShape4D;
+    using Stride = PtoStride4D;
 
     OrgShape orgShape_{};
     Shape shape_{};
     Stride stride_{};
 
-    PTO_HOST_DEVICE constexpr Zn(
+    PTO_HOST_DEVICE Zn(
         Index orgRows = 0,
         Index orgCols = 0,
         Index rowsInFractal = 0,
@@ -552,15 +678,15 @@ struct Zn {
         LongIndex strideRowsByFractal = 0,
         LongIndex strideColsInFractal = 0,
         LongIndex strideColsByFractal = 0)
-        : orgShape_(MakeCoord(orgRows, orgCols)),
-          shape_(MakeCoord(rowsInFractal, rowsByFractal, colsInFractal, colsByFractal)),
-          stride_(MakeCoord(strideRowsInFractal, strideRowsByFractal, strideColsInFractal, strideColsByFractal)) {}
+        : orgShape_(orgRows, orgCols),
+          shape_(rowsInFractal, rowsByFractal, colsInFractal, colsByFractal),
+          stride_(strideRowsInFractal, strideRowsByFractal, strideColsInFractal, strideColsByFractal) {}
 
-    PTO_HOST_DEVICE constexpr Zn(OrgShape orgShape, Shape shape, Stride stride)
+    PTO_HOST_DEVICE Zn(OrgShape orgShape, Shape shape, Stride stride)
         : orgShape_(orgShape), shape_(shape), stride_(stride) {}
 
     template <class Element>
-    PTO_HOST_DEVICE static constexpr Zn MakeLayout(Index orgRows, Index orgCols)
+    PTO_HOST_DEVICE static Zn MakeLayout(Index orgRows, Index orgCols)
     {
         constexpr uint32_t ELE_NUM_PER_C0 = BYTE_PER_C0 / sizeof(Element);
         Index rowsRound = RoundUp<C0_NUM_PER_FRACTAL>(orgRows);
@@ -579,58 +705,80 @@ struct Zn {
 
     PTO_HOST_DEVICE static Zn MakeLayoutInL0C(MatrixCoord const &shape)
     {
-        return Zn(shape.row(),
-                  shape.column(),
+        return MakeLayoutInL0C(shape.ToPtoShape());
+    }
+
+    PTO_HOST_DEVICE static Zn MakeLayoutInL0C(PtoShape2D const &shape)
+    {
+        return Zn(shape.shape[0],
+                  shape.shape[1],
                   C0_NUM_PER_FRACTAL,
-                  CeilDiv<C0_NUM_PER_FRACTAL>(shape.row()),
+                  CeilDiv<C0_NUM_PER_FRACTAL>(shape.shape[0]),
                   C0_NUM_PER_FRACTAL,
-                  CeilDiv<C0_NUM_PER_FRACTAL>(shape.column()),
+                  CeilDiv<C0_NUM_PER_FRACTAL>(shape.shape[1]),
                   C0_NUM_PER_FRACTAL,
                   C0_NUM_PER_FRACTAL * C0_NUM_PER_FRACTAL,
                   1,
-                  RoundUp<C0_NUM_PER_FRACTAL>(shape.row()) * C0_NUM_PER_FRACTAL);
+                  RoundUp<C0_NUM_PER_FRACTAL>(shape.shape[0]) * C0_NUM_PER_FRACTAL);
     }
 
     PTO_HOST_DEVICE LongIndex GetOffset(MatrixCoord const &coord) const
     {
-        return LongIndex(coord.row()) / shape_[0] * stride_[1] + LongIndex(coord.column()) / shape_[2] * stride_[3] +
-            (LongIndex(coord.row()) % shape_[0]) * stride_[0] + (LongIndex(coord.column()) % shape_[2]) * stride_[2];
+        return LongIndex(coord.row()) / shape_.shape[0] * stride_.stride[1] +
+            LongIndex(coord.column()) / shape_.shape[2] * stride_.stride[3] +
+            (LongIndex(coord.row()) % shape_.shape[0]) * stride_.stride[0] +
+            (LongIndex(coord.column()) % shape_.shape[2]) * stride_.stride[2];
+    }
+
+    PTO_HOST_DEVICE LongIndex GetOffset(PtoCoord2D const &coord) const
+    {
+        return LongIndex(coord.shape[0]) / shape_.shape[0] * stride_.stride[1] +
+            LongIndex(coord.shape[1]) / shape_.shape[2] * stride_.stride[3] +
+            (LongIndex(coord.shape[0]) % shape_.shape[0]) * stride_.stride[0] +
+            (LongIndex(coord.shape[1]) % shape_.shape[2]) * stride_.stride[2];
     }
 
     PTO_HOST_DEVICE Zn GetTileLayout(MatrixCoord const &tileOriShape) const
     {
-        auto tileShape = MakeCoord(
-            shape(0), CeilDiv(tileOriShape.row(), shape(0)),
-            shape(2), CeilDiv(tileOriShape.column(), shape(2)));
+        Shape tileShape(shape(0), CeilDiv(tileOriShape.row(), shape(0)), shape(2), CeilDiv(tileOriShape.column(), shape(2)));
+        return Zn(tileOriShape.ToPtoShape(), tileShape, stride());
+    }
+
+    PTO_HOST_DEVICE Zn GetTileLayout(PtoShape2D const &tileOriShape) const
+    {
+        Shape tileShape(shape(0), CeilDiv(tileOriShape.shape[0], shape(0)), shape(2), CeilDiv(tileOriShape.shape[1], shape(2)));
         return Zn(tileOriShape, tileShape, stride());
     }
 
-    PTO_HOST_DEVICE typename OrgShape::Index orgShape(int idx) const { return orgShape_[idx]; }
-    PTO_HOST_DEVICE typename OrgShape::Index &orgShape(int idx) { return orgShape_[idx]; }
+    PTO_HOST_DEVICE int64_t orgShape(int idx) const { return orgShape_.shape[idx]; }
+    PTO_HOST_DEVICE int64_t &orgShape(int idx) { return orgShape_.shape[idx]; }
     PTO_HOST_DEVICE Shape shape() const { return shape_; }
     PTO_HOST_DEVICE Shape &shape() { return shape_; }
-    PTO_HOST_DEVICE typename Shape::Index shape(int idx) const { return shape_[idx]; }
-    PTO_HOST_DEVICE typename Shape::Index &shape(int idx) { return shape_[idx]; }
+    PTO_HOST_DEVICE int64_t shape(int idx) const { return shape_.shape[idx]; }
+    PTO_HOST_DEVICE int64_t &shape(int idx) { return shape_.shape[idx]; }
     PTO_HOST_DEVICE Stride stride() const { return stride_; }
     PTO_HOST_DEVICE Stride &stride() { return stride_; }
-    PTO_HOST_DEVICE typename Stride::Index stride(int idx) const { return stride_[idx]; }
-    PTO_HOST_DEVICE typename Stride::Index &stride(int idx) { return stride_[idx]; }
+    PTO_HOST_DEVICE int64_t stride(int idx) const { return stride_.stride[idx]; }
+    PTO_HOST_DEVICE int64_t &stride(int idx) { return stride_.stride[idx]; }
 };
 
 struct Zz {
     static constexpr int RANK = 4;
+    static constexpr pto::TileLayoutCustom kTileLayout = pto::TileLayoutCustom::ZZ;
+    static constexpr pto::BLayout kBLayout = pto::BLayout::RowMajor;
+    static constexpr pto::SLayout kSLayout = pto::SLayout::RowMajor;
     using Index = uint32_t;
     using LongIndex = int64_t;
     static constexpr int ORG_SHAPE_RANK = 2;
-    using OrgShape = Coord<ORG_SHAPE_RANK, Index>;
-    using Shape = Coord<RANK, Index>;
-    using Stride = Coord<RANK, LongIndex>;
+    using OrgShape = PtoShape2D;
+    using Shape = PtoShape4D;
+    using Stride = PtoStride4D;
 
     OrgShape orgShape_{};
     Shape shape_{};
     Stride stride_{};
 
-    PTO_HOST_DEVICE constexpr Zz(
+    PTO_HOST_DEVICE Zz(
         Index orgRows = 0,
         Index orgCols = 0,
         Index rowsInFractal = 0,
@@ -641,15 +789,15 @@ struct Zz {
         LongIndex strideRowsByFractal = 0,
         LongIndex strideColsInFractal = 0,
         LongIndex strideColsByFractal = 0)
-        : orgShape_(MakeCoord(orgRows, orgCols)),
-          shape_(MakeCoord(rowsInFractal, rowsByFractal, colsInFractal, colsByFractal)),
-          stride_(MakeCoord(strideRowsInFractal, strideRowsByFractal, strideColsInFractal, strideColsByFractal)) {}
+        : orgShape_(orgRows, orgCols),
+          shape_(rowsInFractal, rowsByFractal, colsInFractal, colsByFractal),
+          stride_(strideRowsInFractal, strideRowsByFractal, strideColsInFractal, strideColsByFractal) {}
 
-    PTO_HOST_DEVICE constexpr Zz(OrgShape orgShape, Shape shape, Stride stride)
+    PTO_HOST_DEVICE Zz(OrgShape orgShape, Shape shape, Stride stride)
         : orgShape_(orgShape), shape_(shape), stride_(stride) {}
 
     template <class Element>
-    PTO_HOST_DEVICE static constexpr Zz MakeLayout(Index orgRows, Index orgCols)
+    PTO_HOST_DEVICE static Zz MakeLayout(Index orgRows, Index orgCols)
     {
         constexpr uint32_t ELE_NUM_PER_C0 = BYTE_PER_C0 / sizeof(Element);
         Index rowsRound = RoundUp<C0_NUM_PER_FRACTAL>(orgRows);
@@ -668,19 +816,26 @@ struct Zz {
 
     PTO_HOST_DEVICE LongIndex GetOffset(MatrixCoord const &coord) const
     {
-        return LongIndex(coord.row()) / shape_[0] * stride_[1] + LongIndex(coord.column()) / shape_[2] * stride_[3];
+        return LongIndex(coord.row()) / shape_.shape[0] * stride_.stride[1] +
+            LongIndex(coord.column()) / shape_.shape[2] * stride_.stride[3];
     }
 
-    PTO_HOST_DEVICE typename OrgShape::Index orgShape(int idx) const { return orgShape_[idx]; }
-    PTO_HOST_DEVICE typename OrgShape::Index &orgShape(int idx) { return orgShape_[idx]; }
+    PTO_HOST_DEVICE LongIndex GetOffset(PtoCoord2D const &coord) const
+    {
+        return LongIndex(coord.shape[0]) / shape_.shape[0] * stride_.stride[1] +
+            LongIndex(coord.shape[1]) / shape_.shape[2] * stride_.stride[3];
+    }
+
+    PTO_HOST_DEVICE int64_t orgShape(int idx) const { return orgShape_.shape[idx]; }
+    PTO_HOST_DEVICE int64_t &orgShape(int idx) { return orgShape_.shape[idx]; }
     PTO_HOST_DEVICE Shape shape() const { return shape_; }
     PTO_HOST_DEVICE Shape &shape() { return shape_; }
-    PTO_HOST_DEVICE typename Shape::Index shape(int idx) const { return shape_[idx]; }
-    PTO_HOST_DEVICE typename Shape::Index &shape(int idx) { return shape_[idx]; }
+    PTO_HOST_DEVICE int64_t shape(int idx) const { return shape_.shape[idx]; }
+    PTO_HOST_DEVICE int64_t &shape(int idx) { return shape_.shape[idx]; }
     PTO_HOST_DEVICE Stride stride() const { return stride_; }
     PTO_HOST_DEVICE Stride &stride() { return stride_; }
-    PTO_HOST_DEVICE typename Stride::Index stride(int idx) const { return stride_[idx]; }
-    PTO_HOST_DEVICE typename Stride::Index &stride(int idx) { return stride_[idx]; }
+    PTO_HOST_DEVICE int64_t stride(int idx) const { return stride_.stride[idx]; }
+    PTO_HOST_DEVICE int64_t &stride(int idx) { return stride_.stride[idx]; }
 };
 
 }  // namespace layout
@@ -1301,72 +1456,80 @@ namespace Block {
 
 template <uint32_t SwizzleOffset = 1, uint32_t SwizzleDirection = 0>
 struct GemmIdentityBlockSwizzle {
-    GemmCoord problemShape;
-    MatrixCoord tileMN;
-    MatrixCoord loopsMN;
+    PtoShape3D problemShape;
+    PtoShape2D tileMN;
+    PtoShape2D loopsMN;
 
     PTO_DEVICE GemmIdentityBlockSwizzle() = default;
 
-    PTO_DEVICE GemmIdentityBlockSwizzle(GemmCoord const &problemShape_, MatrixCoord const &tileMN_)
+    PTO_DEVICE GemmIdentityBlockSwizzle(PtoShape3D const &problemShape_, PtoShape2D const &tileMN_)
         : problemShape(problemShape_), tileMN(tileMN_)
     {
-        loopsMN = pto_ext::CeilDiv(MatrixCoord(problemShape.GetCoordMN()), tileMN);
+        loopsMN = pto_ext::CeilDiv(GetPtoShapeMN(problemShape), tileMN);
     }
 
-    PTO_DEVICE void Update(GemmCoord const &problemShape_, MatrixCoord const &tileMN_)
+    PTO_DEVICE void Update(PtoShape3D const &problemShape_, PtoShape2D const &tileMN_)
     {
         problemShape = problemShape_;
         tileMN = tileMN_;
-        loopsMN = pto_ext::CeilDiv(MatrixCoord(problemShape.GetCoordMN()), tileMN);
+        loopsMN = pto_ext::CeilDiv(GetPtoShapeMN(problemShape), tileMN);
     }
 
     PTO_DEVICE uint32_t GetCoreLoops() const
     {
-        return loopsMN.row() * loopsMN.column();
+        return static_cast<uint32_t>(loopsMN.shape[0] * loopsMN.shape[1]);
     }
 
-    PTO_DEVICE GemmCoord GetBlockCoord(uint32_t taskIdx)
+    PTO_DEVICE PtoCoord2D GetBlockCoordMN(uint32_t taskIdx)
     {
         uint32_t innerIdx = taskIdx % GetCoreLoops();
+        uint32_t loopM = static_cast<uint32_t>(loopsMN.shape[0]);
+        uint32_t loopN = static_cast<uint32_t>(loopsMN.shape[1]);
+        uint32_t mIdx = 0;
+        uint32_t nIdx = 0;
         if constexpr (SwizzleDirection == 0) {
-            uint32_t tileBlockLoop = pto_ext::CeilDiv(loopsMN.row(), SwizzleOffset);
-            uint32_t tileBlockIdx = innerIdx / (SwizzleOffset * loopsMN.column());
-            uint32_t inTileBlockIdx = innerIdx % (SwizzleOffset * loopsMN.column());
+            uint32_t tileBlockLoop = pto_ext::CeilDiv(loopM, SwizzleOffset);
+            uint32_t tileBlockIdx = innerIdx / (SwizzleOffset * loopN);
+            uint32_t inTileBlockIdx = innerIdx % (SwizzleOffset * loopN);
             uint32_t nRow = SwizzleOffset;
             if (tileBlockIdx == tileBlockLoop - 1) {
-                nRow = loopsMN.row() - SwizzleOffset * tileBlockIdx;
+                nRow = loopM - SwizzleOffset * tileBlockIdx;
             }
-            uint32_t mIdx = tileBlockIdx * SwizzleOffset + inTileBlockIdx % nRow;
-            uint32_t nIdx = inTileBlockIdx / nRow;
+            mIdx = tileBlockIdx * SwizzleOffset + inTileBlockIdx % nRow;
+            nIdx = inTileBlockIdx / nRow;
             if (tileBlockIdx % 2 == 1) {
-                nIdx = loopsMN.column() - nIdx - 1;
+                nIdx = loopN - nIdx - 1;
             }
-            return GemmCoord{mIdx, nIdx, 0};
         } else {
-            uint32_t tileBlockLoop = pto_ext::CeilDiv(loopsMN.column(), SwizzleOffset);
-            uint32_t tileBlockIdx = innerIdx / (SwizzleOffset * loopsMN.row());
-            uint32_t inTileBlockIdx = innerIdx % (SwizzleOffset * loopsMN.row());
+            uint32_t tileBlockLoop = pto_ext::CeilDiv(loopN, SwizzleOffset);
+            uint32_t tileBlockIdx = innerIdx / (SwizzleOffset * loopM);
+            uint32_t inTileBlockIdx = innerIdx % (SwizzleOffset * loopM);
             uint32_t nCol = SwizzleOffset;
             if (tileBlockIdx == tileBlockLoop - 1) {
-                nCol = loopsMN.column() - SwizzleOffset * tileBlockIdx;
+                nCol = loopN - SwizzleOffset * tileBlockIdx;
             }
-            uint32_t mIdx = inTileBlockIdx / nCol;
-            uint32_t nIdx = tileBlockIdx * SwizzleOffset + inTileBlockIdx % nCol;
+            mIdx = inTileBlockIdx / nCol;
+            nIdx = tileBlockIdx * SwizzleOffset + inTileBlockIdx % nCol;
             if (tileBlockIdx % 2 == 1) {
-                mIdx = loopsMN.row() - mIdx - 1;
+                mIdx = loopM - mIdx - 1;
             }
-            return GemmCoord{mIdx, nIdx, 0};
         }
+        return MakePtoCoord2D(mIdx, nIdx);
     }
 
-    PTO_DEVICE GemmCoord GetActualBlockShape(GemmCoord blockCoord)
+    PTO_DEVICE PtoShape2D GetActualBlockShapeMN(PtoCoord2D const &blockCoord)
     {
-        uint32_t mActual = (blockCoord.m() == (loopsMN.row() - 1)) ?
-            (problemShape.m() - blockCoord.m() * tileMN.row()) : tileMN.row();
-        uint32_t nActual = (blockCoord.n() == (loopsMN.column() - 1)) ?
-            (problemShape.n() - blockCoord.n() * tileMN.column()) : tileMN.column();
-        uint32_t kActual = problemShape.k();
-        return GemmCoord{mActual, nActual, kActual};
+        uint32_t tileM = static_cast<uint32_t>(tileMN.shape[0]);
+        uint32_t tileN = static_cast<uint32_t>(tileMN.shape[1]);
+        uint32_t loopM = static_cast<uint32_t>(loopsMN.shape[0]);
+        uint32_t loopN = static_cast<uint32_t>(loopsMN.shape[1]);
+        uint32_t blockM = static_cast<uint32_t>(blockCoord.shape[0]);
+        uint32_t blockN = static_cast<uint32_t>(blockCoord.shape[1]);
+        uint32_t mActual = (blockM == (loopM - 1)) ?
+            (GetPtoShapeM(problemShape) - blockM * tileM) : tileM;
+        uint32_t nActual = (blockN == (loopN - 1)) ?
+            (GetPtoShapeN(problemShape) - blockN * tileN) : tileN;
+        return PtoShape2D(mActual, nActual);
     }
 };
 

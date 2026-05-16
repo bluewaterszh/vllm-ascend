@@ -101,9 +101,9 @@ int ParseEnvInt(const char *name, int default_value)
 
 bool ZeroWindowMemory(const StandaloneRankRuntime &runtime)
 {
-    const uint64_t window_bytes = runtime.hccl.host_ctx.winSize;
-    for (uint32_t i = 0; i < runtime.hccl.host_ctx.rankNum; ++i) {
-        void *window_ptr = reinterpret_cast<void *>(runtime.hccl.host_ctx.windowsIn[i]);
+    const uint64_t window_bytes = runtime.hccl.WindowBytes();
+    for (uint32_t i = 0; i < runtime.hccl.RankCount(); ++i) {
+        void *window_ptr = runtime.hccl.WindowIn(i);
         if (aclrtMemset(window_ptr, window_bytes, 0, window_bytes) != ACL_SUCCESS) {
             return false;
         }

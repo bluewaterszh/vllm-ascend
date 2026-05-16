@@ -131,7 +131,7 @@ public:
     /// Parameters structure
     struct Params {
         // Data members
-        GemmCoord problemShape;
+        PtoShape3D problemShape;
         __gm__ ElementA *ptrA;
         LayoutA layoutA;
         LayoutA layoutA2;
@@ -180,7 +180,7 @@ public:
 
         PTO_HOST_DEVICE
         Params(
-            GemmCoord problemShape_,
+            PtoShape3D problemShape_,
             uint32_t EP_, uint32_t listLen_, uint32_t expertPerRank_, uint32_t maxOutputSize_,
             uint32_t rank_, uint32_t rankSize_, int32_t ubMoveNum_, GM_ADDR hcclContext_, int64_t topK_,
             uint64_t initRoutingQuantTilingKey_, uint32_t epilogueCoreNum_, uint32_t epilogueGranularity_,
@@ -279,7 +279,7 @@ private:
         gmXActiveMask.SetGlobalBuffer(reinterpret_cast<__gm__ bool*>(params.ptrXActiveMask));
         
         isCombineV1 = true;
-        if (params.problemShape.m() * params.topK <= 4096) {
+        if (GetPtoShapeM(params.problemShape) * params.topK <= 4096) {
             isCombineV1 = false;
         }
     }
@@ -401,7 +401,7 @@ private:
         if (params.ptrXActiveMask == nullptr) {
             return;
         }
-        int32_t m = params.problemShape.m();
+        int32_t m = GetPtoShapeM(params.problemShape);
         int32_t topK = params.topK;
         int32_t expertNum = params.expertPerRank * params.EP;
         AscendC::GlobalTensor<int32_t> expertIdxGm;
@@ -508,12 +508,13 @@ private:
             if (currentM <= L1TileShape::M) {
                 gmB1.SetL2CacheHint(AscendC::CacheMode::CACHE_MODE_DISABLE);
             }
-            GemmCoord inGroupProblemShape{currentM, params.problemShape.n(), params.problemShape.k()};
-            LayoutA layoutA = params.layoutA.GetTileLayout(inGroupProblemShape.GetCoordMK());
+            PtoShape3D inGroupProblemShape = MakePtoShape3D(
+                currentM, GetPtoShapeN(params.problemShape), GetPtoShapeK(params.problemShape));
+            LayoutA layoutA = params.layoutA.GetTileLayout(GetPtoShapeMK(inGroupProblemShape));
             LayoutB layoutB1 = params.layoutB1;
             LayoutScale layoutScale = params.layoutScale1;
-            LayoutC layoutC = LayoutC(inGroupProblemShape.m(), inGroupProblemShape.n());
-            blockScheduler.Update(inGroupProblemShape, MakeCoord(L1TileShape::M, L1TileShape::N));
+            LayoutC layoutC = LayoutC(GetPtoShapeM(inGroupProblemShape), GetPtoShapeN(inGroupProblemShape));
+            blockScheduler.Update(inGroupProblemShape, L1TileShape::ToPtoShapeMN());
             uint32_t coreLoops = blockScheduler.GetCoreLoops();
             // Determine the starting loopIdx of the current core under the current groupIdx
             uint32_t startLoopIdx = ((coreIdx < startCoreIdx) ? (coreIdx + coreNum) : coreIdx) - startCoreIdx;
@@ -525,18 +526,20 @@ private:
                     syncgmmIdx ++;
                 }
 
-                // Compute block location
-                GemmCoord blockCoord = blockScheduler.GetBlockCoord(loopIdx);
-                GemmCoord actualBlockShape = blockScheduler.GetActualBlockShape(blockCoord);
-                // Compute initial location in logical coordinates
-                MatrixCoord offsetA{blockCoord.m() * L1TileShape::M, blockCoord.k() * L1TileShape::K};
-                MatrixCoord offsetB{blockCoord.k() * L1TileShape::K, blockCoord.n() * L1TileShape::N};
-                MatrixCoord offsetC{blockCoord.m() * L1TileShape::M, blockCoord.n() * L1TileShape::N};
+                auto blockCoordMN = blockScheduler.GetBlockCoordMN(loopIdx);
+                auto actualBlockShapeMN = blockScheduler.GetActualBlockShapeMN(blockCoordMN);
+                uint32_t blockM = static_cast<uint32_t>(blockCoordMN.shape[0]);
+                uint32_t blockN = static_cast<uint32_t>(blockCoordMN.shape[1]);
+                auto offsetA = MakePtoCoord2D(blockM * L1TileShape::M, 0);
+                auto offsetB = MakePtoCoord2D(0, blockN * L1TileShape::N);
+                auto offsetC = MakePtoCoord2D(blockM * L1TileShape::M, blockN * L1TileShape::N);
                 int64_t gmOffsetA = layoutA.GetOffset(offsetA);
                 int64_t gmOffsetB = layoutB1.GetOffset(offsetB);
                 int64_t gmOffsetC = layoutC.GetOffset(offsetC);
-                int64_t gmOffsetS = blockCoord.n() * L1TileShape::N + (params.listLen == 1 ? groupIdx * params.problemShape.n() : 0);
+                int64_t gmOffsetS = blockN * L1TileShape::N + (params.listLen == 1 ? groupIdx * GetPtoShapeN(params.problemShape) : 0);
                 if (currentM > 0) {
+                    PtoShape3D actualBlockShape = MakePtoShape3D(
+                        actualBlockShapeMN.shape[0], actualBlockShapeMN.shape[1], GetPtoShapeK(inGroupProblemShape));
                     blockMmad(
                         gmA[gmGroupOffsetA + gmOffsetA], layoutA,
                         gmB1[gmGroupOffsetB + gmOffsetB], layoutB1,
@@ -546,7 +549,7 @@ private:
                     );
                 }
             }
- 
+
             if ((groupIdx + 1) == params.epilogueGranularity  && (groupIdx < params.expertPerRank - 1)) {
                 syncLoopIdx ++;
                 if constexpr (BlockMmad::DispatchPolicy::ASYNC) {
@@ -557,11 +560,11 @@ private:
             }
 
             preCurrentmSum += currentM;
-            gmGroupOffsetA += inGroupProblemShape.m() * inGroupProblemShape.k();
+            gmGroupOffsetA += GetPtoShapeM(inGroupProblemShape) * GetPtoShapeK(inGroupProblemShape);
             if (params.listLen == 1) {
-                gmGroupOffsetB += inGroupProblemShape.k() * inGroupProblemShape.n();
+                gmGroupOffsetB += GetPtoShapeK(inGroupProblemShape) * GetPtoShapeN(inGroupProblemShape);
             }
-            gmGroupOffsetC += inGroupProblemShape.m() * inGroupProblemShape.n();
+            gmGroupOffsetC += GetPtoShapeM(inGroupProblemShape) * GetPtoShapeN(inGroupProblemShape);
             startCoreIdx = (startCoreIdx  + coreLoops) % coreNum;
         }
 
@@ -583,8 +586,8 @@ private:
         BlockScheduler blockScheduler;
         BlockMmad blockMmad(resource);
 
-        uint32_t n2 = params.problemShape.k();
-        uint32_t k2 = params.problemShape.n() / 2;
+        uint32_t n2 = GetPtoShapeK(params.problemShape);
+        uint32_t k2 = GetPtoShapeN(params.problemShape) / 2;
 
         int64_t gmGroupOffsetA = 0;
         int64_t gmGroupOffsetB = 0;
@@ -615,14 +618,14 @@ private:
             if (currentM <= L1TileShape::M) {
                 gmB2.SetL2CacheHint(AscendC::CacheMode::CACHE_MODE_DISABLE);
             }
-            GemmCoord inGroupProblemShape{currentM, n2, k2}; // M N K
+            PtoShape3D inGroupProblemShape = MakePtoShape3D(currentM, n2, k2); // M N K
 
-            LayoutA layoutA = params.layoutA2.GetTileLayout(inGroupProblemShape.GetCoordMK());
+            LayoutA layoutA = params.layoutA2.GetTileLayout(GetPtoShapeMK(inGroupProblemShape));
             LayoutB layoutB2 = params.layoutB2;
             LayoutScale layoutScale = params.layoutScale2;
-            LayoutC layoutC = LayoutC(inGroupProblemShape.m(), inGroupProblemShape.n());
+            LayoutC layoutC = LayoutC(GetPtoShapeM(inGroupProblemShape), GetPtoShapeN(inGroupProblemShape));
 
-            blockScheduler.Update(inGroupProblemShape, MakeCoord(L1TileShape::M, L1TileShape::N));
+            blockScheduler.Update(inGroupProblemShape, L1TileShape::ToPtoShapeMN());
             uint32_t coreLoops = blockScheduler.GetCoreLoops();
 
             // Determine the starting loopIdx of the current core under the current groupIdx
@@ -637,20 +640,21 @@ private:
                     syncLoopIdx = groupIdx;
                 }
 
-                // Compute block location
-                GemmCoord blockCoord = blockScheduler.GetBlockCoord(loopIdx);
-                GemmCoord actualBlockShape = blockScheduler.GetActualBlockShape(blockCoord);
-
-                // Compute initial location in logical coordinates
-                MatrixCoord offsetA{blockCoord.m() * L1TileShape::M, blockCoord.k() * L1TileShape::K};
-                MatrixCoord offsetB{blockCoord.k() * L1TileShape::K, blockCoord.n() * L1TileShape::N};
-                MatrixCoord offsetC{blockCoord.m() * L1TileShape::M, blockCoord.n() * L1TileShape::N};
+                auto blockCoordMN = blockScheduler.GetBlockCoordMN(loopIdx);
+                auto actualBlockShapeMN = blockScheduler.GetActualBlockShapeMN(blockCoordMN);
+                uint32_t blockM = static_cast<uint32_t>(blockCoordMN.shape[0]);
+                uint32_t blockN = static_cast<uint32_t>(blockCoordMN.shape[1]);
+                auto offsetA = MakePtoCoord2D(blockM * L1TileShape::M, 0);
+                auto offsetB = MakePtoCoord2D(0, blockN * L1TileShape::N);
+                auto offsetC = MakePtoCoord2D(blockM * L1TileShape::M, blockN * L1TileShape::N);
 
                 int64_t gmOffsetA = layoutA.GetOffset(offsetA);
                 int64_t gmOffsetB = layoutB2.GetOffset(offsetB);
                 int64_t gmOffsetC = layoutC.GetOffset(offsetC);
-                int64_t gmOffsetS = blockCoord.n() * L1TileShape::N + (params.listLen == 1 ? groupIdx * n2 : 0);   // One scale group per expert
+                int64_t gmOffsetS = blockN * L1TileShape::N + (params.listLen == 1 ? groupIdx * n2 : 0);   // One scale group per expert
                 if (currentM > 0) {
+                    PtoShape3D actualBlockShape = MakePtoShape3D(
+                        actualBlockShapeMN.shape[0], actualBlockShapeMN.shape[1], GetPtoShapeK(inGroupProblemShape));
                     blockMmad(
                             gmPermutedToken[gmGroupOffsetA + gmOffsetA], layoutA,
                             gmB2[gmGroupOffsetB + gmOffsetB], layoutB2,
@@ -661,11 +665,11 @@ private:
                 }
             }
             preCurrentmSum += currentM;
-            gmGroupOffsetA += inGroupProblemShape.m() * inGroupProblemShape.k();
+            gmGroupOffsetA += GetPtoShapeM(inGroupProblemShape) * GetPtoShapeK(inGroupProblemShape);
             if (params.listLen == 1) {
-                gmGroupOffsetB += inGroupProblemShape.k() * inGroupProblemShape.n();
+                gmGroupOffsetB += GetPtoShapeK(inGroupProblemShape) * GetPtoShapeN(inGroupProblemShape);
             }
-            gmGroupOffsetC += inGroupProblemShape.m() * inGroupProblemShape.n();
+            gmGroupOffsetC += GetPtoShapeM(inGroupProblemShape) * GetPtoShapeN(inGroupProblemShape);
 
             startCoreIdx = (startCoreIdx + coreLoops) % coreNum;
         }
@@ -842,7 +846,7 @@ private:
         icache_preload(8);
         int64_t localTokenPerExpertOffset = peerMemoryLayout.offsetPeerTokenPerExpert + tokenPerExpertLayout(params.rank, 0, 0) * sizeof(int32_t);
         GM_ADDR localTokenPerExpert = shmem() + localTokenPerExpertOffset;     // Place the entire communication matrix in peermem
-        uint32_t expandedRowIdxOffset = AlignUp(params.problemShape.m(), 256) * params.topK * sizeof(int32_t);
+        uint32_t expandedRowIdxOffset = AlignUp(GetPtoShapeM(params.problemShape), 256) * params.topK * sizeof(int32_t);
 
         ApplyXActiveMask(params);
 
@@ -901,11 +905,11 @@ private:
                     prevSum += rows;
                     GM_ADDR otherRankPtr = shmem(0, dstEpIdx);
                     __gm__ ElementA* remotePackedRows = reinterpret_cast<__gm__ ElementA*>(otherRankPtr + peerMemoryLayout.offsetA);
-                    MatrixCoord offsetA{rowStart, 0};
+                    auto offsetA = MakePtoCoord2D(rowStart, 0);
                     int64_t gmOffsetA = params.layoutA.GetOffset(offsetA);
-                    int64_t gmOffsetPeer = rowSrc * (params.problemShape.k() + UB_ALIGN);
+                    int64_t gmOffsetPeer = rowSrc * (GetPtoShapeK(params.problemShape) + UB_ALIGN);
                     int32_t ubMoveNum = 2;
-                    CopyGMToGMPerToken(gmA[gmOffsetA], gmPerTokenScale1[rowStart], remotePackedRows + gmOffsetPeer, rows, params.problemShape.k(), ubMoveNum, pingpongIdx);
+                    CopyGMToGMPerToken(gmA[gmOffsetA], gmPerTokenScale1[rowStart], remotePackedRows + gmOffsetPeer, rows, GetPtoShapeK(params.problemShape), ubMoveNum, pingpongIdx);
                 }
 
             }
@@ -936,7 +940,7 @@ private:
         AscendC::WaitFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID0);
         AscendC::WaitFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID1);
 
-        uint32_t n2 = params.problemShape.k();
+        uint32_t n2 = GetPtoShapeK(params.problemShape);
 
 
         typename BlockEpilogue2::Params epilogueParams2{
@@ -963,7 +967,7 @@ private:
             tokenPerExpertLayout
         };
         
-        uint32_t n = params.problemShape.n();
+        uint32_t n = GetPtoShapeN(params.problemShape);
         BlockEpilogue2 blockEpilogue2(resource, epilogueParams2);
         BlockEpilogue3 blockEpilogue3(resource, epilogueParams3);
         BlockEpilogue1 blockEpilogue1(resource, n);
@@ -973,9 +977,9 @@ private:
         AscendC::SyncAll<true>();
         if (dequantSum1 > 0) { 
             uint32_t rowStartThisCore = 0;
-            MatrixCoord offsetC{0U, 0};
-            MatrixCoord shapeC{dequantSum1, params.problemShape.n()};
-            LayoutC layoutC{dequantSum1, params.problemShape.n()};
+            auto offsetC = MakePtoCoord2D(0U, 0);
+            PtoShape2D shapeC(dequantSum1, GetPtoShapeN(params.problemShape));
+            LayoutC layoutC{dequantSum1, GetPtoShapeN(params.problemShape)};
             int64_t gmOffsetC = layoutC.GetOffset(offsetC);
             int64_t gmOffsetD = params.layoutD1.GetOffset(offsetC);
             blockEpilogue1(gmC[gmOffsetC], shapeC, gmPerTokenScale1[rowStartThisCore], gmPermutedToken[gmOffsetD], gmPerTokenScale2[rowStartThisCore], params.epilogueCoreNum);
@@ -990,10 +994,10 @@ private:
             AscendC::SyncAll<true>();
             if (dequantSum2 > 0) {
                 uint32_t rowStartThisCore = dequantSum1;
-                MatrixCoord offsetC{rowStartThisCore, 0};
+                auto offsetC = MakePtoCoord2D(rowStartThisCore, 0);
                 uint32_t dequantLen = dequantSum2;
-                MatrixCoord shapeC{dequantLen, params.problemShape.n()};
-                LayoutC layoutC{dequantLen, params.problemShape.n()};
+                PtoShape2D shapeC(dequantLen, GetPtoShapeN(params.problemShape));
+                LayoutC layoutC{dequantLen, GetPtoShapeN(params.problemShape)};
                 int64_t gmOffsetC = layoutC.GetOffset(offsetC);
                 int64_t gmOffsetD = params.layoutD1.GetOffset(offsetC);
                 blockEpilogue1(gmC[gmOffsetC], shapeC, gmPerTokenScale1[rowStartThisCore], gmPermutedToken[gmOffsetD], gmPerTokenScale2[rowStartThisCore], coreNum);
@@ -1020,7 +1024,7 @@ private:
         shmem.CrossRankSync();
 
         MoeTokenUnpermuteTilingData tilingData;
-        MoeTokenUnpermuteTiling(params.problemShape.m() * params.topK, n2, params.topK, tilingData, coreNum);
+        MoeTokenUnpermuteTiling(GetPtoShapeM(params.problemShape) * params.topK, n2, params.topK, tilingData, coreNum);
         KernelMoeTokenUnpermute<ElementD2, int32_t, float, true> kernelMoeTokenUnpermuteOp;
         kernelMoeTokenUnpermuteOp.Init(shmem() + peerMemoryLayout.offsetD, workspaceInfo.expandedRowIdx, params.probs, reinterpret_cast<GM_ADDR>(params.ptrOutput), &tilingData);
         kernelMoeTokenUnpermuteOp.Process();
@@ -1028,7 +1032,7 @@ private:
 
     PTO_DEVICE
     void CombineV1(Params const &params, BlockEpilogue2 & blockEpilogue) {
-        uint32_t n2 = params.problemShape.k();
+        uint32_t n2 = GetPtoShapeK(params.problemShape);
         int32_t prevGroupSum2 = 0;
 
         icache_preload(8);
@@ -1051,9 +1055,9 @@ private:
                     int32_t tmpBlock = AlignUp(params.expertPerRank, FLAGSTRIDE);
                     //uint32_t dstRowOffset = preSumBeforeRank(dstEpIdx * tmpBlock + groupIdx);
                     uint32_t dstRowOffset = preSumBeforeRank(dstEpIdx * params.expertPerRank + groupIdx);
-                    MatrixCoord offsetC{srcRowOffset, 0};
-                    MatrixCoord offsetPeer{dstRowOffset, 0};
-                    MatrixCoord shapeC{dataRows, n2};
+                    auto offsetC = MakePtoCoord2D(srcRowOffset, 0);
+                    auto offsetPeer = MakePtoCoord2D(dstRowOffset, 0);
+                    PtoShape2D shapeC(dataRows, n2);
                     int64_t gmOffsetC = params.layoutD2.GetOffset(offsetC);
                     int64_t gmOffsetPeer = params.layoutD2.GetOffset(offsetPeer);
                     __gm__ ElementD2* dstPeerBase = reinterpret_cast<__gm__ ElementD2*>(dstPeermemPtr) + gmOffsetPeer;
@@ -1078,8 +1082,8 @@ private:
         uint32_t aicCoreIdx = get_block_idx();
         uint32_t aivSubCoreIdx = get_subblockid();
         uint32_t preSrcExpertSum = 0;
-        uint32_t n2 = params.problemShape.k();
-        uint32_t k2 = params.problemShape.n() / 2;
+        uint32_t n2 = GetPtoShapeK(params.problemShape);
+        uint32_t k2 = GetPtoShapeN(params.problemShape) / 2;
         icache_preload(8);
         for (uint32_t groupIdx = 0; groupIdx < params.expertPerRank; ++groupIdx) {
             uint32_t currentExpertM = cumsumMM((params.EP - 1) * params.expertPerRank + groupIdx);
@@ -1088,22 +1092,24 @@ private:
             } else if (preSrcExpertSum + currentExpertM > params.maxOutputSize) {
                 currentExpertM = params.maxOutputSize - preSrcExpertSum;
             }
-            GemmCoord inGroupProblemShape{currentExpertM, n2, k2}; // M N K
-            blockScheduler.Update(inGroupProblemShape, MakeCoord(L1TileShape::M, L1TileShape::N));
+            PtoShape3D inGroupProblemShape = MakePtoShape3D(currentExpertM, n2, k2); // M N K
+            blockScheduler.Update(inGroupProblemShape, L1TileShape::ToPtoShapeMN());
             uint32_t coreLoops = blockScheduler.GetCoreLoops();
             uint32_t startLoopIdx = ((aicCoreIdx < startCoreIdx) ? (aicCoreIdx + aicCoreNum) : aicCoreIdx) - startCoreIdx;
 
             for (uint32_t loopIdx = startLoopIdx; loopIdx < coreLoops; loopIdx += aicCoreNum) {
-                GemmCoord blockCoord = blockScheduler.GetBlockCoord(loopIdx);
-                GemmCoord actualBlockShape = blockScheduler.GetActualBlockShape(blockCoord);
+                auto blockCoordMN = blockScheduler.GetBlockCoordMN(loopIdx);
+                auto actualBlockShapeMN = blockScheduler.GetActualBlockShapeMN(blockCoordMN);
                 int32_t m0 = 16;
-                //  Block count, the shape of each block is (m0, actualBlockShape.n())
-                int32_t m_rows = (actualBlockShape.m() + m0 - 1) / m0;
+                uint32_t blockM = static_cast<uint32_t>(actualBlockShapeMN.shape[0]);
+                uint32_t blockN = static_cast<uint32_t>(actualBlockShapeMN.shape[1]);
+                //  Block count, the shape of each block is (m0, blockN)
+                int32_t m_rows = (blockM + m0 - 1) / m0;
                 int32_t aiv_m_rows = m_rows / 2;
                 if (aivSubCoreIdx == 1 && aiv_m_rows * 2 < m_rows) {
                     aiv_m_rows += 1;
                 }
-                uint32_t m_offset = blockCoord.m() * L1TileShape::M;//blockOffset
+                uint32_t m_offset = static_cast<uint32_t>(blockCoordMN.shape[0]) * L1TileShape::M;
                 if(aivSubCoreIdx == 1) {
                     m_offset += (m_rows / 2) * m0;
                 }
@@ -1115,12 +1121,12 @@ private:
                 }
 
                 for (int32_t cur_row = 0; cur_row < aiv_m_rows; cur_row ++) {
-                    GemmCoord realTileCoord{m_offset, blockCoord.n() * L1TileShape::N, 1};
+                    auto realTileCoord = MakePtoCoord2D(m_offset, static_cast<uint32_t>(blockCoordMN.shape[1]) * L1TileShape::N);
                     uint32_t actualm = m0;
                     if(aivSubCoreIdx == 1 && cur_row == aiv_m_rows - 1){
-                        actualm = actualBlockShape.m() - (m_rows / 2) * m0 - cur_row * m0;
+                        actualm = blockM - (m_rows / 2) * m0 - cur_row * m0;
                     }
-                    GemmCoord realTileShape{actualm, actualBlockShape.n(), 1};
+                    PtoShape2D realTileShape(actualm, blockN);
                     blockEpilogue(gmC2, gmPerTokenScale2, realTileCoord, realTileShape, groupIdx, preSrcExpertSum, preSumBeforeRank);
                     m_offset += m0;
                 }
@@ -1151,12 +1157,12 @@ private:
 
         PTO_DEVICE
         WorkspaceInfo(const Params & params) {
-            uint32_t k2 = params.problemShape.n() / 2;
-            uint32_t n2 = params.problemShape.k();
+            uint32_t k2 = GetPtoShapeN(params.problemShape) / 2;
+            uint32_t n2 = GetPtoShapeK(params.problemShape);
             int64_t workspaceOffset = 0;
             expandedRowIdx = params.ptrWorkspace;
 
-            workspaceOffset += AlignUp(params.problemShape.m(), 256) * params.topK * sizeof(int32_t);
+            workspaceOffset += AlignUp(GetPtoShapeM(params.problemShape), 256) * params.topK * sizeof(int32_t);
             ptrcumsumMM = params.ptrWorkspace + workspaceOffset;
 
             workspaceOffset += (params.EP * params.EP * params.expertPerRank) * sizeof(int32_t);
@@ -1173,13 +1179,13 @@ private:
             workspaceOffset += (params.EP * params.EP * params.expertPerRank) * sizeof(int32_t);
             ptrC = params.ptrWorkspace + workspaceOffset;
 
-            workspaceOffset += params.maxOutputSize * params.problemShape.n() * sizeof(ElementC);
+            workspaceOffset += params.maxOutputSize * GetPtoShapeN(params.problemShape) * sizeof(ElementC);
             ptrC2 = params.ptrWorkspace + workspaceOffset;
 
             workspaceOffset += params.maxOutputSize * n2 * sizeof(ElementC);
             ptrA = params.ptrWorkspace + workspaceOffset;
 
-            workspaceOffset += params.maxOutputSize * params.problemShape.k() * sizeof(ElementA);
+            workspaceOffset += params.maxOutputSize * GetPtoShapeK(params.problemShape) * sizeof(ElementA);
             ptrPermutedToken = params.ptrWorkspace + workspaceOffset;
 
             workspaceOffset += params.maxOutputSize * k2 * sizeof(ElementA);

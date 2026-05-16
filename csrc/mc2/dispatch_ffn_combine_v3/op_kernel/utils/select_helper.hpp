@@ -16,7 +16,7 @@ struct LayoutBInitializer {
 
 template <typename Layout, typename ElementType>
 struct LayoutBInitializer<Layout, ElementType,
-    std::enable_if_t<std::is_same_v<Layout, pto_ext::layout::Zn>>>
+    std::enable_if_t<Layout::kTileLayout == pto::TileLayoutCustom::ZN>>
 {
     PTO_DEVICE
     static Layout create(uint32_t k, uint32_t n)
