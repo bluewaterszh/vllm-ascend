@@ -86,10 +86,7 @@ class MoeV2FullLoadDynamicQuant : public MoeV2SortBase {
 template <typename T>
 __aicore__ inline void MoeV2FullLoadDynamicQuant<T>::CopyIn() {
   LocalTensor<int32_t> inLocal = sortDataCopyInQueue.AllocTensor<int32_t>();
-  DataCopyExtParams dataCopyParams{static_cast<uint16_t>(1), static_cast<uint32_t>(this->totalLength * sizeof(int32_t)),
-                                   0, 0, 0};
-  DataCopyPadExtParams<int32_t> dataCopyPadParams{false, 0, 0, 0};
-  DataCopyPad(inLocal[0], expertIdxGm_, dataCopyParams, dataCopyPadParams);
+  pto_detail::PtoLoadVector(inLocal[0], expertIdxGm_, this->totalLength);
   ArithProgression<int32_t>(inLocal[this->sortNum_], 0, 1, this->totalLength);
   sortDataCopyInQueue.EnQue(inLocal);
 }
@@ -133,10 +130,7 @@ __aicore__ inline void MoeV2FullLoadDynamicQuant<T>::SortCompute() {
 template <typename T>
 __aicore__ inline void MoeV2FullLoadDynamicQuant<T>::CopyOutIdx() {
   LocalTensor<int32_t> expandedRowIdx = expandedRowIdxCopyOutQueue_.DeQue<int32_t>();
-  DataCopyParams intriParams;
-  intriParams.blockCount = 1;
-  intriParams.blockLen = this->totalLength * sizeof(int32_t);
-  DataCopyPad(expandedRowIdxGm_, expandedRowIdx, intriParams);
+  pto_detail::PtoStoreVector(expandedRowIdxGm_, expandedRowIdx, this->totalLength);
   expandedRowIdxCopyOutQueue_.EnQue(expandedRowIdx);
 }
 
@@ -171,10 +165,8 @@ __aicore__ inline void MoeV2FullLoadDynamicQuant<T>::ComputeExpertTokenCountOrCu
       lastExpertId++;
     }
   }
-  DataCopyExtParams copyParams{static_cast<uint16_t>(1), static_cast<uint32_t>(this->expertNum * sizeof(int32_t)), 0, 0,
-                               0};
   if (this->expertTokensCountOrCumsumFlag > 0) {
-    DataCopyPad(expertTokensCountOrCumsumGm, expertTokensCount, copyParams);
+    pto_detail::PtoStoreVector(expertTokensCountOrCumsumGm, expertTokensCount, this->expertNum);
   }
   expertTokensCopyOutQueue_.FreeTensor(expertTokensCount);
 }
@@ -193,17 +185,14 @@ __aicore__ inline void MoeV2FullLoadDynamicQuant<T>::Compute(LocalTensor<float>&
   LocalTensor<float> dynamicQuantLocal = outLocal[this->cols_].template ReinterpretCast<float>();
 
   if constexpr (!IsSameType<T, float>::value) {
-    Cast(inLocal, inLocal.ReinterpretCast<T>()[colsAlign], RoundMode::CAST_NONE, this->cols_);
-    AscendC::PipeBarrier<PIPE_V>();
+    pto_detail::PtoCastVector(inLocal, inLocal.ReinterpretCast<T>()[colsAlign], this->cols_, pto::RoundMode::CAST_NONE);
   }
 
   if (smoothType != 0) {
-    Mul(inLocal, inLocal, smoothLocal, this->cols_);
-    AscendC::PipeBarrier<PIPE_V>();
+    pto_detail::PtoMulElementwiseVector(inLocal, inLocal, smoothLocal, this->cols_);
   }
 
-  Abs(tempLocal, inLocal, this->cols_);
-  AscendC::PipeBarrier<PIPE_V>();
+  pto_detail::PtoAbsVector(tempLocal, inLocal, this->cols_);
 
   ReduceMax(dynamicQuantLocal, tempLocal, tempLocal, this->cols_);
   AscendC::PipeBarrier<PIPE_V>();
@@ -214,13 +203,10 @@ __aicore__ inline void MoeV2FullLoadDynamicQuant<T>::Compute(LocalTensor<float>&
   Duplicate<float>(tempLocal, maxValue, this->cols_);
   AscendC::PipeBarrier<PIPE_V>();
 
-  Div(tempLocal, inLocal, tempLocal, this->cols_);
-  AscendC::PipeBarrier<PIPE_V>();
+  pto_detail::PtoDivVector(tempLocal, inLocal, tempLocal, this->cols_);
 
-  Cast(tempLocal.ReinterpretCast<half>(), tempLocal, RoundMode::CAST_TRUNC, this->cols_);
-  AscendC::PipeBarrier<PIPE_V>();
-
-  Cast(outLocal, tempLocal.ReinterpretCast<half>(), RoundMode::CAST_ROUND, this->cols_);
+  pto_detail::PtoCastVector(tempLocal.ReinterpretCast<half>(), tempLocal, this->cols_, pto::RoundMode::CAST_TRUNC);
+  pto_detail::PtoCastVector(outLocal, tempLocal.ReinterpretCast<half>(), this->cols_, pto::RoundMode::CAST_ROUND);
 
   calcQueue.FreeTensor(tempLocal);
   inputXOutQueue.EnQue(outLocal);
@@ -237,23 +223,19 @@ __aicore__ inline void MoeV2FullLoadDynamicQuant<T>::CopyOutXQuant1H() {
   int64_t startXRow = curRowsStart / this->k_;
   int64_t endXRow = curRowsEnd / this->k_;
 
-  DataCopyExtParams dataXCopyParams{1, static_cast<uint32_t>(this->cols_ * sizeof(T)), 0, 0, 0};
-  DataCopyExtParams smoothCopyParams{1, static_cast<uint32_t>(this->cols_ * sizeof(float)), 0, 0, 0};
-  DataCopyExtParams intriParams{1, static_cast<uint32_t>((this->cols_ + BLOCK_BYTES) * sizeof(int8_t)), 0, 0, 0};
-
   LocalTensor<float> smoothLocal;
   if (smoothType == 1) {
     smoothLocal = smoothInQueue.AllocTensor<float>();
-    DataCopyPad(smoothLocal, quantSmoothGm, smoothCopyParams, {false, 0, 0, 0});
+    pto_detail::PtoLoadVector(smoothLocal, quantSmoothGm, this->cols_);
     smoothInQueue.EnQue(smoothLocal);
     smoothLocal = smoothInQueue.DeQue<float>();
   }
   for (int64_t row = startXRow; row <= endXRow; row++) {
     LocalTensor<T> xLocal = xCopyInQueue_.AllocTensor<T>();
     if constexpr (IsSameType<T, float>::value) {
-      DataCopyPad(xLocal, xGm_[row * this->cols_], dataXCopyParams, {false, 0, 0, 0});
+      pto_detail::PtoLoadVector(xLocal, xGm_[row * this->cols_], this->cols_);
     } else {
-      DataCopyPad(xLocal[colsAlign], xGm_[row * this->cols_], dataXCopyParams, {false, 0, 0, 0});
+      pto_detail::PtoLoadVector(xLocal[colsAlign], xGm_[row * this->cols_], this->cols_);
     }
 
     xCopyInQueue_.EnQue<T>(xLocal);
@@ -266,7 +248,7 @@ __aicore__ inline void MoeV2FullLoadDynamicQuant<T>::CopyOutXQuant1H() {
       if (outIndex == -1 || (this->dropPadMode == DROPLESS_MODE && outIndex >= this->activateRows_)) {
         continue;
       }
-      DataCopyPad(expandedXGm_[outIndex * this->cols_scale_], outLocal, intriParams);
+      pto_detail::PtoStoreVector(expandedXGm_[outIndex * this->cols_scale_], outLocal, this->cols_scale_);
     }
 
     xCopyInQueue_.FreeTensor(xLocal);

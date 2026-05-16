@@ -22,38 +22,38 @@ struct StandaloneHcclContext {
     int device_id = 0;
     rtStream_t hccl_stream = nullptr;
     HcclComm comm = nullptr;
-    HcclDeviceContext *device_ctx = nullptr;
-    HcclDeviceContext host_ctx{};
-    bool owns_device_ctx = false;
+    PtoRemoteWindowContext *remote_window_ctx = nullptr;
+    PtoRemoteWindowContext host_remote_window_ctx{};
+    bool owns_remote_window_ctx = false;
 
-    HcclDeviceContext *DeviceContextPtr() const
+    PtoRemoteWindowContext *RemoteWindowContextPtr() const
     {
-        return device_ctx;
+        return remote_window_ctx;
     }
 
     uint64_t WindowBytes() const
     {
-        return host_ctx.winSize;
+        return host_remote_window_ctx.windowBytes;
     }
 
     uint32_t RankCount() const
     {
-        return host_ctx.rankNum;
+        return host_remote_window_ctx.rankSize;
     }
 
     void *WindowIn(uint32_t rank) const
     {
-        return reinterpret_cast<void *>(host_ctx.windowsIn[rank]);
+        return reinterpret_cast<void *>(host_remote_window_ctx.windowIn[rank]);
     }
 
-    void AttachExternalDeviceContext(HcclDeviceContext *deviceCtx);
-    void ReleaseDeviceContext();
-    void ResetHostDeviceContext();
-    void SetHostDeviceWorkspace(uint64_t workspace, uint64_t workspaceSize);
-    void SetHostDeviceInfo(uint32_t rankId, uint32_t rankCount, uint64_t windowBytes);
-    void SetHostDeviceWindow(uint32_t rank, uint64_t windowIn, uint64_t windowOut);
-    bool LoadHostDeviceContextFromDevice();
-    bool CopyHostDeviceContextToDevice();
+    void AttachExternalRemoteWindowContext(PtoRemoteWindowContext *remoteWindowCtx);
+    void ReleaseRemoteWindowContext();
+    void ResetHostRemoteWindowContext();
+    void SetHostContextWorkspace(uint64_t workspaceBase, uint64_t workspaceBytes);
+    void SetHostRankInfo(uint32_t rank, uint32_t rankCount, uint64_t windowBytes);
+    void SetHostWindow(uint32_t rank, uint64_t windowIn, uint64_t windowOut);
+    bool LoadHostRemoteWindowContextFromDevice();
+    bool CopyHostRemoteWindowContextToDevice();
 };
 
 struct StandaloneRankRuntime {

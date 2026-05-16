@@ -25,6 +25,24 @@ using PtoV2PackedPayloadTile =
 template <typename Element, int TileElems = 1024>
 using PtoV2VecTile = pto::Tile<pto::TileType::Vec, Element, 1, TileElems, pto::BLayout::RowMajor, -1, -1>;
 
+template <typename Element>
+using PtoV2ShapeDyn = pto::Shape<pto::DYNAMIC, pto::DYNAMIC, pto::DYNAMIC, pto::DYNAMIC, pto::DYNAMIC>;
+
+template <typename Element>
+using PtoV2StrideDyn = pto::Stride<pto::DYNAMIC, pto::DYNAMIC, pto::DYNAMIC, pto::DYNAMIC, pto::DYNAMIC>;
+
+template <typename Element>
+using PtoV2GlobalNd = pto::GlobalTensor<Element, PtoV2ShapeDyn<Element>, PtoV2StrideDyn<Element>, pto::Layout::ND>;
+
+template <typename Element>
+PTO_INTERNAL PtoV2GlobalNd<Element> MakeContiguousGlobal(const GlobalTensor<Element> &tensor, uint32_t elemNum)
+{
+    PtoV2ShapeDyn<Element> shape(1, 1, 1, 1, elemNum);
+    PtoV2StrideDyn<Element> stride(elemNum, elemNum, elemNum, elemNum, 1);
+    auto *ptr = const_cast<__gm__ Element *>(tensor.GetPhyAddr());
+    return PtoV2GlobalNd<Element>(ptr, shape, stride);
+}
+
 template <typename Element, int TileElems = 1024>
 PTO_INTERNAL void PtoMoveVector(const LocalTensor<Element> &dstLocal, const LocalTensor<Element> &srcLocal, uint32_t elemNum)
 {
@@ -83,6 +101,133 @@ PTO_INTERNAL void PtoCastVector(const LocalTensor<DstElement> &dstLocal,
         pto::TASSIGN(dstTile, reinterpret_cast<uint64_t>(dstChunk.GetPhyAddr()));
         pto::TASSIGN(srcTile, reinterpret_cast<uint64_t>(srcChunk.GetPhyAddr()));
         pto::TCVT(dstTile, srcTile, mode);
+    }
+}
+
+template <typename Element, int TileElems = 1024>
+PTO_INTERNAL void PtoLoadVector(const LocalTensor<Element> &dstLocal,
+                                const GlobalTensor<Element> &srcGlobalTensor,
+                                uint32_t elemNum)
+{
+    using Tile = PtoV2VecTile<Element, TileElems>;
+    for (uint32_t offset = 0; offset < elemNum; offset += TileElems) {
+        const uint32_t cur = (elemNum - offset < static_cast<uint32_t>(TileElems))
+                                 ? (elemNum - offset)
+                                 : static_cast<uint32_t>(TileElems);
+        auto dstChunk = dstLocal[offset];
+        auto srcChunk = srcGlobalTensor[offset];
+        auto srcGlobal = MakeContiguousGlobal(srcChunk, cur);
+        Tile dstTile(1, cur);
+        pto::TASSIGN(dstTile, reinterpret_cast<uint64_t>(dstChunk.GetPhyAddr()));
+        pto::TLOAD(dstTile, srcGlobal);
+    }
+}
+
+template <typename Element, int TileElems = 1024>
+PTO_INTERNAL void PtoStoreVector(const GlobalTensor<Element> &dstGlobalTensor,
+                                 const LocalTensor<Element> &srcLocal,
+                                 uint32_t elemNum)
+{
+    using Tile = PtoV2VecTile<Element, TileElems>;
+    for (uint32_t offset = 0; offset < elemNum; offset += TileElems) {
+        const uint32_t cur = (elemNum - offset < static_cast<uint32_t>(TileElems))
+                                 ? (elemNum - offset)
+                                 : static_cast<uint32_t>(TileElems);
+        auto dstChunk = dstGlobalTensor[offset];
+        auto srcChunk = srcLocal[offset];
+        auto dstGlobal = MakeContiguousGlobal(dstChunk, cur);
+        Tile srcTile(1, cur);
+        pto::TASSIGN(srcTile, reinterpret_cast<uint64_t>(srcChunk.GetPhyAddr()));
+        pto::TSTORE(dstGlobal, srcTile);
+    }
+}
+
+template <typename Element, int TileElems = 1024>
+PTO_INTERNAL void PtoAddScalarVector(const LocalTensor<Element> &dstLocal,
+                                     const LocalTensor<Element> &srcLocal,
+                                     uint32_t elemNum,
+                                     Element scalar)
+{
+    using Tile = PtoV2VecTile<Element, TileElems>;
+    for (uint32_t offset = 0; offset < elemNum; offset += TileElems) {
+        const uint32_t cur = (elemNum - offset < static_cast<uint32_t>(TileElems))
+                                 ? (elemNum - offset)
+                                 : static_cast<uint32_t>(TileElems);
+        auto dstChunk = dstLocal[offset];
+        auto srcChunk = srcLocal[offset];
+        Tile dstTile(1, cur);
+        Tile srcTile(1, cur);
+        pto::TASSIGN(dstTile, reinterpret_cast<uint64_t>(dstChunk.GetPhyAddr()));
+        pto::TASSIGN(srcTile, reinterpret_cast<uint64_t>(srcChunk.GetPhyAddr()));
+        pto::TADDS(dstTile, srcTile, scalar);
+    }
+}
+
+template <typename Element, int TileElems = 1024>
+PTO_INTERNAL void PtoMulElementwiseVector(const LocalTensor<Element> &dstLocal,
+                                          const LocalTensor<Element> &src0Local,
+                                          const LocalTensor<Element> &src1Local,
+                                          uint32_t elemNum)
+{
+    using Tile = PtoV2VecTile<Element, TileElems>;
+    for (uint32_t offset = 0; offset < elemNum; offset += TileElems) {
+        const uint32_t cur = (elemNum - offset < static_cast<uint32_t>(TileElems))
+                                 ? (elemNum - offset)
+                                 : static_cast<uint32_t>(TileElems);
+        auto dstChunk = dstLocal[offset];
+        auto src0Chunk = src0Local[offset];
+        auto src1Chunk = src1Local[offset];
+        Tile dstTile(1, cur);
+        Tile src0Tile(1, cur);
+        Tile src1Tile(1, cur);
+        pto::TASSIGN(dstTile, reinterpret_cast<uint64_t>(dstChunk.GetPhyAddr()));
+        pto::TASSIGN(src0Tile, reinterpret_cast<uint64_t>(src0Chunk.GetPhyAddr()));
+        pto::TASSIGN(src1Tile, reinterpret_cast<uint64_t>(src1Chunk.GetPhyAddr()));
+        pto::TMUL(dstTile, src0Tile, src1Tile);
+    }
+}
+
+template <typename Element, int TileElems = 1024>
+PTO_INTERNAL void PtoAbsVector(const LocalTensor<Element> &dstLocal,
+                               const LocalTensor<Element> &srcLocal,
+                               uint32_t elemNum)
+{
+    using Tile = PtoV2VecTile<Element, TileElems>;
+    for (uint32_t offset = 0; offset < elemNum; offset += TileElems) {
+        const uint32_t cur = (elemNum - offset < static_cast<uint32_t>(TileElems))
+                                 ? (elemNum - offset)
+                                 : static_cast<uint32_t>(TileElems);
+        auto dstChunk = dstLocal[offset];
+        auto srcChunk = srcLocal[offset];
+        Tile dstTile(1, cur);
+        Tile srcTile(1, cur);
+        pto::TASSIGN(dstTile, reinterpret_cast<uint64_t>(dstChunk.GetPhyAddr()));
+        pto::TASSIGN(srcTile, reinterpret_cast<uint64_t>(srcChunk.GetPhyAddr()));
+        pto::TABS(dstTile, srcTile);
+    }
+}
+
+template <typename Element, int TileElems = 1024>
+PTO_INTERNAL void PtoDivVector(const LocalTensor<Element> &dstLocal,
+                               const LocalTensor<Element> &src0Local,
+                               const LocalTensor<Element> &src1Local,
+                               uint32_t elemNum)
+{
+    using Tile = PtoV2VecTile<Element, TileElems>;
+    for (uint32_t offset = 0; offset < elemNum; offset += TileElems) {
+        const uint32_t cur = (elemNum - offset < static_cast<uint32_t>(TileElems))
+                                 ? (elemNum - offset)
+                                 : static_cast<uint32_t>(TileElems);
+        auto dstChunk = dstLocal[offset];
+        auto src0Chunk = src0Local[offset];
+        auto src1Chunk = src1Local[offset];
+        Tile dstTile(1, cur);
+        Tile src0Tile(1, cur);
+        Tile src1Tile(1, cur);
+        pto::TASSIGN(dstTile, reinterpret_cast<uint64_t>(dstChunk.GetPhyAddr()));
+        pto::TASSIGN(src0Tile, reinterpret_cast<uint64_t>(src0Chunk.GetPhyAddr()));
+        pto::TASSIGN(src1Tile, reinterpret_cast<uint64_t>(src1Chunk.GetPhyAddr()));
+        pto::TDIV(dstTile, src0Tile, src1Tile);
     }
 }
 

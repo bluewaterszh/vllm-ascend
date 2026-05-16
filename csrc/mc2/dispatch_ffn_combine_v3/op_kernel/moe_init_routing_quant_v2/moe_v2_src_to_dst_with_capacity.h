@@ -16,6 +16,7 @@
 #define INNER_MOE_V2_SRC_TO_DST_WITH_CAPACITY_H
 
 #include "moe_v2_common.h"
+#include "moe_v2_pto_sort.h"
 
 namespace MoeInitRoutingQuantV2 {
 using namespace AscendC;
@@ -102,8 +103,8 @@ template <typename T, typename TilingData>
 __aicore__ inline void MoeV2SrcToDstWithCapacity<T, TilingData>::CopyIn(int64_t progress) {
   LocalTensor<int32_t> inLocal = copyInQueue.AllocTensor<int32_t>();
   int64_t length = Align(currentLoopRows, sizeof(int32_t));
-  DataCopy(inLocal, expandDstToSrcRowGm[progress * perLoopRows], length);
-  DataCopy(inLocal[length], expandedExpertIdxGm[progress * perLoopRows], length);
+  pto_detail::PtoLoadVector(inLocal, expandDstToSrcRowGm[progress * perLoopRows], length);
+  pto_detail::PtoLoadVector(inLocal[length], expandedExpertIdxGm[progress * perLoopRows], length);
   copyInQueue.EnQue<int32_t>(inLocal);
 }
 
@@ -112,7 +113,6 @@ __aicore__ inline void MoeV2SrcToDstWithCapacity<T, TilingData>::CopyOut(int64_t
   LocalTensor<int32_t> inLocal = copyInQueue.DeQue<int32_t>();
   LocalTensor<int32_t> outLocal = copyOutQueue.AllocTensor<int32_t>();
   int64_t length = Align(currentLoopRows, sizeof(int32_t));
-  DataCopyExtParams copyParams{static_cast<uint16_t>(1), static_cast<uint32_t>(sizeof(int32_t)), 0, 0, 0};
 
   SetWaitFlag<HardEvent::MTE2_S>(HardEvent::MTE2_S);
   if (this->lastExpertId == -1) {
@@ -131,8 +131,7 @@ __aicore__ inline void MoeV2SrcToDstWithCapacity<T, TilingData>::CopyOut(int64_t
           if (i == this->colLoops - 1) {
             col = this->lastLoopCols;
           }
-          DataCopyExtParams copyParams1{static_cast<uint16_t>(1), static_cast<uint32_t>(col * sizeof(T)), 0, 0, 0};
-          DataCopyPad(expandedXGm[index * this->cols + i * this->perLoopCols], this->outTmpLocal, copyParams1);
+          pto_detail::PtoStoreVector(expandedXGm[index * this->cols + i * this->perLoopCols], this->outTmpLocal, col);
           SetWaitFlag<HardEvent::MTE3_S>(HardEvent::MTE3_S);
         }
         this->tokenCount++;
@@ -146,7 +145,7 @@ __aicore__ inline void MoeV2SrcToDstWithCapacity<T, TilingData>::CopyOut(int64_t
       index = expertIdx * this->expertCapacity + this->tokenCount;
       outLocal.SetValue(0, index);
       SetWaitFlag<HardEvent::S_MTE3>(HardEvent::S_MTE3);
-      DataCopyPad(expandedRowIdxGm[outOffset], outLocal, copyParams);
+      pto_detail::PtoStoreVector(expandedRowIdxGm[outOffset], outLocal, 1);
       SetWaitFlag<HardEvent::MTE3_S>(HardEvent::MTE3_S);
       this->tokenCount++;
     }
@@ -169,8 +168,7 @@ __aicore__ inline void MoeV2SrcToDstWithCapacity<T, TilingData>::CopyOutRemain()
         if (i == this->colLoops - 1) {
           col = this->lastLoopCols;
         }
-        DataCopyExtParams copyParams{static_cast<uint16_t>(1), static_cast<uint32_t>(col * sizeof(T)), 0, 0, 0};
-        DataCopyPad(expandedXGm[index * this->cols + i * this->perLoopCols], this->outTmpLocal, copyParams);
+        pto_detail::PtoStoreVector(expandedXGm[index * this->cols + i * this->perLoopCols], this->outTmpLocal, col);
         SetWaitFlag<HardEvent::MTE3_S>(HardEvent::MTE3_S);
       }
       this->tokenCount++;

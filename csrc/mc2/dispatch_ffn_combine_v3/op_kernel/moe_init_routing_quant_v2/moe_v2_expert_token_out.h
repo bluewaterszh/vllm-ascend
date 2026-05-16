@@ -16,6 +16,7 @@
 #define INNER_MOE_V2_EXPERT_TOKEN_OUT_H
 
 #include "moe_v2_common.h"
+#include "moe_v2_pto_sort.h"
 
 namespace MoeInitRoutingQuantV2 {
 using namespace AscendC;
@@ -107,7 +108,7 @@ __aicore__ inline void MoeV2ExpertTokenOut::InitLocal() {
 
 __aicore__ inline void MoeV2ExpertTokenOut::CopyIn(int64_t progress) {
   LocalTensor<int32_t> inLocal = copyInQueue.AllocTensor<int32_t>();
-  DataCopy(inLocal, expandedExpertIdxGm[progress * perLoopRows], Align(currentLoopRows, sizeof(int32_t)));
+  pto_detail::PtoLoadVector(inLocal, expandedExpertIdxGm[progress * perLoopRows], currentLoopRows);
   copyInQueue.EnQue<int32_t>(inLocal);
 }
 
@@ -212,11 +213,10 @@ __aicore__ inline void MoeV2ExpertTokenOut::CopyOutTokenGm() {
   }
   this->expertTokenIdxOutLocal.SetValue(this->expertNumUbAlign, this->lastExpertId);
   this->expertTokenIdxOutLocal.SetValue(this->expertNumUbAlign + 1, this->tokenCount);
-  DataCopyExtParams copyParams{static_cast<uint16_t>(1), static_cast<uint32_t>(EXPERT_ID_VALUE_NUM * sizeof(int32_t)),
-                               0, 0, 0};
   SetWaitFlag<HardEvent::S_MTE3>(HardEvent::S_MTE3);
-  DataCopyPad(expertIdxValueGm[this->blockIdx * EXPERT_ID_VALUE_NUM],
-              this->expertTokenIdxOutLocal[this->expertNumUbAlign], copyParams);
+  pto_detail::PtoStoreVector(expertIdxValueGm[this->blockIdx * EXPERT_ID_VALUE_NUM],
+                             this->expertTokenIdxOutLocal[this->expertNumUbAlign],
+                             EXPERT_ID_VALUE_NUM);
   CopyOutExpertTokensCount(true);
 }
 

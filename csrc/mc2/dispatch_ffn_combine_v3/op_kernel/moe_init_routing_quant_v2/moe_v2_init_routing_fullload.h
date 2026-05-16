@@ -75,10 +75,7 @@ class MoeV2FullLoad : public MoeV2SortBase {
 template <typename T>
 __aicore__ inline void MoeV2FullLoad<T>::CopyIn() {
   LocalTensor<int32_t> inLocal = sortDataCopyInQueue.AllocTensor<int32_t>();
-  DataCopyExtParams dataCopyParams{static_cast<uint16_t>(1), static_cast<uint32_t>(this->totalLength * sizeof(int32_t)),
-                                   0, 0, 0};
-  DataCopyPadExtParams<int32_t> dataCopyPadParams{false, 0, 0, 0};
-  DataCopyPad(inLocal[0], expertIdxGm_, dataCopyParams, dataCopyPadParams);
+  pto_detail::PtoLoadVector(inLocal[0], expertIdxGm_, this->totalLength);
   ArithProgression<int32_t>(inLocal[this->sortNum_], 0, 1, this->totalLength);
   sortDataCopyInQueue.EnQue(inLocal);
 }
@@ -124,10 +121,7 @@ __aicore__ inline void MoeV2FullLoad<T>::SortCompute() {
 template <typename T>
 __aicore__ inline void MoeV2FullLoad<T>::CopyOutIdx() {
   LocalTensor<int32_t> expandedRowIdx = expandedRowIdxCopyOutQueue_.DeQue<int32_t>();
-  DataCopyParams intriParams;
-  intriParams.blockCount = 1;
-  intriParams.blockLen = this->totalLength * sizeof(int32_t);
-  DataCopyPad(expandedRowIdxGm_, expandedRowIdx, intriParams);
+  pto_detail::PtoStoreVector(expandedRowIdxGm_, expandedRowIdx, this->totalLength);
   expandedRowIdxCopyOutQueue_.EnQue(expandedRowIdx);
 }
 
@@ -162,10 +156,8 @@ __aicore__ inline void MoeV2FullLoad<T>::ComputeExpertTokenCountOrCumsum() {
       lastExpertId++;
     }
   }
-  DataCopyExtParams copyParams{static_cast<uint16_t>(1), static_cast<uint32_t>(this->expertNum * sizeof(int32_t)), 0, 0,
-                               0};
   if (this->expertTokensCountOrCumsumFlag > 0) {
-    DataCopyPad(expertTokensCountOrCumsumGm, expertTokensCount, copyParams);
+    pto_detail::PtoStoreVector(expertTokensCountOrCumsumGm, expertTokensCount, this->expertNum);
   }
   expertTokensCopyOutQueue_.FreeTensor(expertTokensCount);
   expandedExpertIdxCopyOutQueue_.FreeTensor(expandedExpertIdx);
@@ -175,18 +167,14 @@ template <typename T>
 __aicore__ inline void MoeV2FullLoad<T>::CopyOutX() {
   LocalTensor<T> xLocal = xCopyInQueue_.AllocTensor<T>();
   LocalTensor<int32_t> expandedRowIdx = expandedRowIdxCopyOutQueue_.DeQue<int32_t>();
-  DataCopyParams intriParams;
-  intriParams.blockCount = 1;
-  intriParams.blockLen = this->cols_ * sizeof(T);
   int64_t inFactor = Align(this->cols_, sizeof(T));
   int64_t curRowsStart = this->blockIdx_ * this->perCoreRows_;
   int64_t startXRow = curRowsStart / this->k_;
   int64_t endXRow = (curRowsStart + this->coreRows_ - 1) / this->k_;
 
-  DataCopyExtParams dataXCopyParams{static_cast<uint16_t>(endXRow - startXRow + 1),
-                                    static_cast<uint32_t>(this->cols_ * sizeof(T)), 0, 0, 0};
-  DataCopyPadExtParams<T> dataXCopyPadParams{false, 0, 0, 0};
-  DataCopyPad(xLocal, xGm_[startXRow * this->cols_], dataXCopyParams, dataXCopyPadParams);
+  for (int64_t row = startXRow; row <= endXRow; row++) {
+    pto_detail::PtoLoadVector(xLocal[(row - startXRow) * inFactor], xGm_[row * this->cols_], this->cols_);
+  }
   SetWaitFlag<HardEvent::MTE2_S>(HardEvent::MTE2_S);
 
   int64_t k = 0;
@@ -194,7 +182,8 @@ __aicore__ inline void MoeV2FullLoad<T>::CopyOutX() {
     for (; k < this->perCoreRows_ && curRowsStart / this->k_ == i; curRowsStart++, k++) {
       int32_t outIndex = expandedRowIdx.GetValue(curRowsStart);
       if (outIndex < this->activateRows_) {
-        DataCopyPad(expandedXGm_[outIndex * this->cols_], xLocal[(i - startXRow) * inFactor], intriParams);
+        pto_detail::PtoStoreVector(expandedXGm_[outIndex * this->cols_], xLocal[(i - startXRow) * inFactor],
+                                   this->cols_);
       }
     }
   }

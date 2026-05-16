@@ -9,7 +9,7 @@
 
 #define FORCE_INLINE_AICORE inline __attribute__((always_inline)) __aicore__
 constexpr int32_t MAX_RANK_SIZE = 32;
-constexpr int32_t HCCL_WINDOW_MEM = 700 * MB_SIZE;
+constexpr int32_t PTO_REMOTE_WINDOW_MEM = 700 * MB_SIZE;
 
 constexpr uint32_t BARRIER_COUNTER_STRIDE = 16;
 constexpr uint32_t BARRIER_EPOCH_INDEX = 2048;
@@ -40,26 +40,26 @@ FORCE_INLINE_AICORE void gm_dcci(__gm__ T *addr)
     __asm__ __volatile__("");
 }
 
-class HcclWindow {
+class PtoRemoteWindow {
 public:
-    FORCE_INLINE_AICORE HcclWindow() { segmentBytes_ = HCCL_WINDOW_MEM; }
+    FORCE_INLINE_AICORE PtoRemoteWindow() { segmentBytes_ = PTO_REMOTE_WINDOW_MEM; }
 
-    FORCE_INLINE_AICORE void InitWindow(GM_ADDR hcclContext)
+    FORCE_INLINE_AICORE void Init(GM_ADDR remoteWindowContext)
     {
-        hcclCtx_ = reinterpret_cast<__gm__ HcclDeviceContext *>(hcclContext);
-        rank_ = static_cast<int32_t>(hcclCtx_->rankId);
-        rankSize_ = static_cast<int32_t>(hcclCtx_->rankNum);
-        segmentBytes_ = static_cast<size_t>(hcclCtx_->winSize);
+        context_ = reinterpret_cast<__gm__ PtoRemoteWindowContext *>(remoteWindowContext);
+        rank_ = static_cast<int32_t>(context_->rank);
+        rankSize_ = static_cast<int32_t>(context_->rankSize);
+        segmentBytes_ = static_cast<size_t>(context_->windowBytes);
     }
 
     FORCE_INLINE_AICORE GM_ADDR LocalWindowBase() const
     {
-        return reinterpret_cast<GM_ADDR>(hcclCtx_->windowsIn[rank_]);
+        return reinterpret_cast<GM_ADDR>(context_->windowIn[rank_]);
     }
 
     FORCE_INLINE_AICORE GM_ADDR RankWindowBase(int32_t rankId) const
     {
-        return reinterpret_cast<GM_ADDR>(hcclCtx_->windowsIn[rankId]);
+        return reinterpret_cast<GM_ADDR>(context_->windowIn[rankId]);
     }
 
     FORCE_INLINE_AICORE GM_ADDR operator()() const
@@ -198,7 +198,7 @@ private:
         return pto::comm::Signal(RemoteTokenReadyCounter(rankId, srcRank));
     }
 
-    __gm__ HcclDeviceContext *hcclCtx_ = nullptr;
+    __gm__ PtoRemoteWindowContext *context_ = nullptr;
     int32_t rank_ = 0;
     int32_t rankSize_ = 0;
     size_t segmentBytes_ = 0;

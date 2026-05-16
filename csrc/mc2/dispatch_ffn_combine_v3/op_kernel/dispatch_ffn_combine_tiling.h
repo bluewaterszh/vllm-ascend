@@ -52,7 +52,7 @@ struct CoCTiling {
 };
 
 struct DispatchFFNCombineRuntimeInfo {
-    uint64_t hcclContext = 0;
+    uint64_t remoteWindowContext = 0;
     uint32_t rank = 0;
     uint32_t rankSize = 0;
 };

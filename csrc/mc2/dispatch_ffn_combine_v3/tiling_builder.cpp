@@ -86,7 +86,8 @@ DispatchFFNCombineBuildResult BuildDispatchFFNCombineTiling(const CaseConfig &cf
     FillCoCTiling(result.tiling.cocTiling, cfg);
     FillInitRoutingTiling(result.tiling.cocTiling, cfg);
 
-    result.tiling.runtimeInfo.hcclContext = reinterpret_cast<uint64_t>(runtime.hccl.DeviceContextPtr());
+    result.tiling.runtimeInfo.remoteWindowContext =
+        reinterpret_cast<uint64_t>(runtime.hccl.RemoteWindowContextPtr());
     result.tiling.runtimeInfo.rank = static_cast<uint32_t>(runtime.hccl.rank_id);
     result.tiling.runtimeInfo.rankSize = static_cast<uint32_t>(runtime.hccl.world_size);
 

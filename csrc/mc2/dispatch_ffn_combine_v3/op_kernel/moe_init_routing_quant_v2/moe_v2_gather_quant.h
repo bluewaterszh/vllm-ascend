@@ -17,6 +17,7 @@
 
 #include "moe_v2_common.h"
 #include "kernel_operator.h"
+#include "moe_v2_pto_sort.h"
 
 namespace MoeInitRoutingQuantV2 {
 using namespace AscendC;
@@ -80,9 +81,7 @@ template <typename T>
 __aicore__ inline void MoeV2GatherQuant<T>::CopyInIndices(int64_t progress) {
   this->indicesOffset = progress * this->perLoopRows;
   LocalTensor<int32_t> indicesLocal = expandRowIdxCopyInQueue.AllocTensor<int32_t>();
-  DataCopyExtParams dataCopyParams{1, static_cast<uint32_t>(this->currentLoopRows * sizeof(int32_t)), 0, 0, 0};
-  DataCopyPadExtParams<int32_t> dataCopyPadParams{false, 0, 0, 0};
-  DataCopyPad(indicesLocal, expandedRowIdxGm[indicesOffset], dataCopyParams, dataCopyPadParams);
+  pto_detail::PtoLoadVector(indicesLocal, expandedRowIdxGm[indicesOffset], this->currentLoopRows);
   expandRowIdxCopyInQueue.EnQue<int32_t>(indicesLocal);
 }
 
@@ -94,36 +93,25 @@ __aicore__ inline void MoeV2GatherQuant<T>::Compute() {
   LocalTensor<half> halfLocal = halfQueue.AllocTensor<half>();
   uint32_t elements = Align(this->colsTileLength, sizeof(T));
   if constexpr (IsSameType<T, bfloat16_t>::value) {
-    Cast(floatLocal, inLocal, RoundMode::CAST_NONE, elements);
-    AscendC::PipeBarrier<PIPE_V>();
-    Cast(halfLocal, floatLocal, RoundMode::CAST_NONE, elements);
-    AscendC::PipeBarrier<PIPE_V>();
-    Muls(halfLocal, halfLocal, static_cast<half>(this->scale), elements);
-    AscendC::PipeBarrier<PIPE_V>();
-    Adds(halfLocal, halfLocal, static_cast<half>(this->offset), elements);
-    AscendC::PipeBarrier<PIPE_V>();
+    pto_detail::PtoCastVector(floatLocal, inLocal, elements, pto::RoundMode::CAST_NONE);
+    pto_detail::PtoCastVector(halfLocal, floatLocal, elements, pto::RoundMode::CAST_NONE);
+    pto_detail::PtoMulVector(halfLocal, halfLocal, elements, static_cast<half>(this->scale));
+    pto_detail::PtoAddScalarVector(halfLocal, halfLocal, elements, static_cast<half>(this->offset));
     LocalTensor<int32_t> intLocal = floatLocal.ReinterpretCast<int32_t>();
-    Cast(intLocal, halfLocal, RoundMode::CAST_RINT, elements);
-    AscendC::PipeBarrier<PIPE_V>();
+    pto_detail::PtoCastVector(intLocal, halfLocal, elements, pto::RoundMode::CAST_RINT);
     SetDeqScale((half)1.000000e+00f);
     AscendC::PipeBarrier<PIPE_V>();
-    Cast(halfLocal, intLocal, RoundMode::CAST_RINT, elements);
-    AscendC::PipeBarrier<PIPE_V>();
-    Cast(outLocal, halfLocal, RoundMode::CAST_RINT, elements);
+    pto_detail::PtoCastVector(halfLocal, intLocal, elements, pto::RoundMode::CAST_RINT);
+    pto_detail::PtoCastVector(outLocal, halfLocal, elements, pto::RoundMode::CAST_RINT);
   } else if constexpr (IsSameType<T, float>::value) {
-    Cast(halfLocal, inLocal, RoundMode::CAST_NONE, elements);
-    AscendC::PipeBarrier<PIPE_V>();
-    Muls(halfLocal, halfLocal, static_cast<half>(this->scale), elements);
-    AscendC::PipeBarrier<PIPE_V>();
-    Adds(halfLocal, halfLocal, static_cast<half>(this->offset), elements);
-    AscendC::PipeBarrier<PIPE_V>();
-    Cast(outLocal, halfLocal, RoundMode::CAST_RINT, elements);
+    pto_detail::PtoCastVector(halfLocal, inLocal, elements, pto::RoundMode::CAST_NONE);
+    pto_detail::PtoMulVector(halfLocal, halfLocal, elements, static_cast<half>(this->scale));
+    pto_detail::PtoAddScalarVector(halfLocal, halfLocal, elements, static_cast<half>(this->offset));
+    pto_detail::PtoCastVector(outLocal, halfLocal, elements, pto::RoundMode::CAST_RINT);
   } else {
-    Muls(inLocal, inLocal, static_cast<T>(this->scale), elements);
-    AscendC::PipeBarrier<PIPE_V>();
-    Adds(inLocal, inLocal, static_cast<T>(this->offset), elements);
-    AscendC::PipeBarrier<PIPE_V>();
-    Cast(outLocal, inLocal, RoundMode::CAST_RINT, elements);
+    pto_detail::PtoMulVector(inLocal, inLocal, elements, static_cast<T>(this->scale));
+    pto_detail::PtoAddScalarVector(inLocal, inLocal, elements, static_cast<T>(this->offset));
+    pto_detail::PtoCastVector(outLocal, inLocal, elements, pto::RoundMode::CAST_RINT);
   }
   inputXCopyOutQueue.EnQue(outLocal);
   floatQueue.FreeTensor(floatLocal);
@@ -147,13 +135,10 @@ __aicore__ inline void MoeV2GatherQuant<T>::CopyOut(int64_t progress) {
       LocalTensor<T> inLocal = inputXCopyInQueue.AllocTensor<T>();
       // input row position
       inputOffset = row * this->cols + colsLoop * this->perLoopCols;
-      DataCopyExtParams dataCopyParams{1, static_cast<uint32_t>(this->colsTileLength * sizeof(T)), 0, 0, 0};
-      DataCopyPadExtParams<T> dataCopyPadParams{false, 0, 0, 0};
-      DataCopyPad(inLocal, inputXGm[inputOffset], dataCopyParams, dataCopyPadParams);
+      pto_detail::PtoLoadVector(inLocal, inputXGm[inputOffset], this->colsTileLength);
       inputXCopyInQueue.EnQue<T>(inLocal);
       Compute();
       LocalTensor<int8_t> outLocal = inputXCopyOutQueue.DeQue<int8_t>();
-      DataCopyExtParams intriParams{1, static_cast<uint32_t>(this->colsTileLength * sizeof(int8_t)), 0, 0, 0};
       while (curLoopRow < this->currentLoopRows && initialRow / this->k == row) {
         int32_t outIndex = indicesLocal.GetValue(curLoopRow);
         curLoopRow++;
@@ -162,7 +147,7 @@ __aicore__ inline void MoeV2GatherQuant<T>::CopyOut(int64_t progress) {
           continue;
         }
         outOffset = outIndex * cols + colsLoop * this->perLoopCols;
-        DataCopyPad(expandedXGm[outOffset], outLocal, intriParams);
+        pto_detail::PtoStoreVector(expandedXGm[outOffset], outLocal, this->colsTileLength);
       }
       inputXCopyInQueue.FreeTensor(inLocal);
       inputXCopyOutQueue.FreeTensor(outLocal);

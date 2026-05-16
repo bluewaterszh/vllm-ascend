@@ -124,7 +124,7 @@ public:
         LayoutC layoutC;
         int32_t n0;
         int32_t rank;
-        HcclWindow hcclWindow;
+        PtoRemoteWindow remoteWindow;
         int32_t offsetD;
         int32_t scratchOffset;
         Layout3D tokenPerExpertLayout;
@@ -132,10 +132,10 @@ public:
         Params() {};
         PTO_DEVICE
         Params(int32_t EP_, int32_t expertPerRank_, int32_t rank_, __gm__ int32_t *ptrTokenPerExpert_,
-        LayoutC layoutC_, int32_t n2_, int32_t n0_, HcclWindow& hcclWindow_, int32_t offsetD_, int32_t scratchOffset_, Layout3D tokenPerExpertLayout_) :
+        LayoutC layoutC_, int32_t n2_, int32_t n0_, PtoRemoteWindow& remoteWindow_, int32_t offsetD_, int32_t scratchOffset_, Layout3D tokenPerExpertLayout_) :
         ptrTokenPerExpert(ptrTokenPerExpert_), EP(EP_),
         expertPerRank(expertPerRank_),rank(rank_), layoutC(layoutC_), n2(n2_), n0(n0_),
-        hcclWindow(hcclWindow_), offsetD(offsetD_), scratchOffset(scratchOffset_), tokenPerExpertLayout(tokenPerExpertLayout_)
+        remoteWindow(remoteWindow_), offsetD(offsetD_), scratchOffset(scratchOffset_), tokenPerExpertLayout(tokenPerExpertLayout_)
          {}
     };
 
@@ -287,7 +287,7 @@ public:
                 dstOffsetInExpert = stTile - stRankInExpert;
             }
             AscendC::GlobalTensor<ElementD> gmRemotePeer;
-            __gm__ void* dstPeermemPtr = params.hcclWindow(params.offsetD, dstEpIdx);
+            __gm__ void* dstPeermemPtr = params.remoteWindow(params.offsetD, dstEpIdx);
             gmRemotePeer.SetGlobalBuffer(reinterpret_cast<__gm__ ElementD*>(dstPeermemPtr));
             auto dstOffset = MakePtoCoord2D(dstOffsetInExpert + dstExpertOffset, blockCol);
             int64_t gmDstOffset = params.layoutC.GetOffset(dstOffset);
@@ -302,7 +302,7 @@ public:
 
                 int32_t logicalSubCoreIdx = get_block_idx() + get_subblockid() * get_block_num();
                 int64_t scratchOffsetBytes = params.scratchOffset + static_cast<int64_t>(logicalSubCoreIdx) * n0 * sizeof(ElementD);
-                __gm__ ElementD* localScratch = reinterpret_cast<__gm__ ElementD*>(params.hcclWindow(scratchOffsetBytes, params.rank));
+                __gm__ ElementD* localScratch = reinterpret_cast<__gm__ ElementD*>(params.remoteWindow(scratchOffsetBytes, params.rank));
                 AscendC::GlobalTensor<ElementD> gmLocalScratch;
                 gmLocalScratch.SetGlobalBuffer(localScratch);
                 ShapeDyn rowShape(1, 1, 1, 1, actualN);

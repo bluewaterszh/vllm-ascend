@@ -89,9 +89,7 @@ __aicore__ inline void MoeV2SortMultiCore::InitExpertTokensGlobalMemory() {
 __aicore__ inline void MoeV2SortMultiCore::VBSCopyIn(int64_t progress, int64_t size, int64_t sortNum) {
   LocalTensor<int32_t> inLocal = sortDataCopyInQueue.AllocTensor<int32_t>();
   int64_t inOffset = progress * sortCoreLoopElements;
-  DataCopyExtParams dataCopyParams{static_cast<uint16_t>(1), static_cast<uint32_t>(size * sizeof(int32_t)), 0, 0, 0};
-  DataCopyPadExtParams<int32_t> dataCopyPadParams{false, 0, 0, 0};
-  DataCopyPad(inLocal[0], expertIdxGm[inOffset], dataCopyParams, dataCopyPadParams);
+  pto_detail::PtoLoadVector(inLocal[0], expertIdxGm[inOffset], size);
 
   LocalTensor<int32_t> rowIdxLocal = inLocal[sortNum];
   int64_t startValue = this->blockIdx * this->vbsTilingData->perCoreElements + inOffset;
@@ -115,9 +113,11 @@ __aicore__ inline void MoeV2SortMultiCore::UBSortCompute(int64_t progress, int64
 
 __aicore__ inline void MoeV2SortMultiCore::VBSCopyOut(int64_t progress, int64_t size, int64_t sortNum) {
   LocalTensor<float> outLocal = sortDataCopyOutQueue.DeQue<float>();
-  DataCopy(workspaceGms[0][this->blockIdx * GetSortLen<float>(this->vbsTilingData->perCoreElements) +
-                           GetSortLen<float>(progress * sortCoreLoopElements)],
-           outLocal, Align(GetSortLen<float>(size), sizeof(float)));
+  pto_detail::PtoStoreVector(
+      workspaceGms[0][this->blockIdx * GetSortLen<float>(this->vbsTilingData->perCoreElements) +
+                      GetSortLen<float>(progress * sortCoreLoopElements)],
+      outLocal,
+      GetSortLen<float>(size));
   sortDataCopyOutQueue.FreeTensor(outLocal);
 }
 

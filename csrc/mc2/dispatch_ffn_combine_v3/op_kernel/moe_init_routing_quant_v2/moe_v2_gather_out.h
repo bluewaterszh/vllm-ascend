@@ -17,6 +17,7 @@
 
 #include "moe_v2_common.h"
 #include "kernel_operator.h"
+#include "moe_v2_pto_sort.h"
 
 namespace MoeInitRoutingQuantV2 {
 using namespace AscendC;
@@ -72,9 +73,7 @@ template <typename T>
 __aicore__ inline void MoeV2GatherOut<T>::CopyInIndices(int64_t progress) {
   this->indicesOffset = progress * this->perLoopRows;
   LocalTensor<int32_t> indicesLocal = expandDstToSrcRowCopyInQueue.AllocTensor<int32_t>();
-  DataCopyExtParams dataCopyParams{1, static_cast<uint32_t>(this->currentLoopRows * sizeof(int32_t)), 0, 0, 0};
-  DataCopyPadExtParams<int32_t> dataCopyPadParams{false, 0, 0, 0};
-  DataCopyPad(indicesLocal, expandedRowIdxGm[indicesOffset], dataCopyParams, dataCopyPadParams);
+  pto_detail::PtoLoadVector(indicesLocal, expandedRowIdxGm[indicesOffset], this->currentLoopRows);
 
   expandDstToSrcRowCopyInQueue.EnQue<int32_t>(indicesLocal);
 }
@@ -96,12 +95,9 @@ __aicore__ inline void MoeV2GatherOut<T>::CopyOut(int64_t progress) {
       LocalTensor<T> inLocal = inputActivationsCopyInQueue.AllocTensor<T>();
       // input row position
       inputOffset = row * this->cols + colsLoop * this->perLoopCols;
-      DataCopyExtParams dataCopyParams{1, static_cast<uint32_t>(this->colsTileLength * sizeof(T)), 0, 0, 0};
-      DataCopyPadExtParams<T> dataCopyPadParams{false, 0, 0, 0};
-      DataCopyPad(inLocal, inputXGm[inputOffset], dataCopyParams, dataCopyPadParams);
+      pto_detail::PtoLoadVector(inLocal, inputXGm[inputOffset], this->colsTileLength);
       SetWaitFlag<HardEvent::MTE2_MTE3>(HardEvent::MTE2_MTE3);
 
-      DataCopyExtParams intriParams{1, static_cast<uint32_t>(this->colsTileLength * sizeof(T)), 0, 0, 0};
       while (curLoopRow < this->currentLoopRows && initialRow / this->k == row) {
         int32_t outIndex = indicesLocal.GetValue(curLoopRow);
         curLoopRow++;
@@ -110,7 +106,7 @@ __aicore__ inline void MoeV2GatherOut<T>::CopyOut(int64_t progress) {
           continue;
         }
         outOffset = outIndex * cols + colsLoop * this->perLoopCols;
-        DataCopyPad(expandedXGm[outOffset], inLocal, intriParams);
+        pto_detail::PtoStoreVector(expandedXGm[outOffset], inLocal, this->colsTileLength);
       }
       inputActivationsCopyInQueue.FreeTensor(inLocal);
     }

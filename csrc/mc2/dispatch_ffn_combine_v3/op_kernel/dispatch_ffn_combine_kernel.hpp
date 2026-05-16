@@ -155,7 +155,7 @@ public:
         uint32_t rank;
         uint32_t rankSize;
         int32_t ubMoveNum;
-        GM_ADDR hcclContext;
+        GM_ADDR remoteWindowContext;
         //--------------
         GM_ADDR expertIdx;
         GM_ADDR moeInitRoutingQuantV2Scale;
@@ -182,7 +182,7 @@ public:
         Params(
             PtoShape3D problemShape_,
             uint32_t EP_, uint32_t listLen_, uint32_t expertPerRank_, uint32_t maxOutputSize_,
-            uint32_t rank_, uint32_t rankSize_, int32_t ubMoveNum_, GM_ADDR hcclContext_, int64_t topK_,
+            uint32_t rank_, uint32_t rankSize_, int32_t ubMoveNum_, GM_ADDR remoteWindowContext_, int64_t topK_,
             uint64_t initRoutingQuantTilingKey_, uint32_t epilogueCoreNum_, uint32_t epilogueGranularity_,
             GM_ADDR ptrA_, LayoutA layoutA_, LayoutA layoutA2_,
             GM_ADDR ptrB1_, LayoutB layoutB1_,
@@ -198,7 +198,7 @@ public:
             optiling::MoeInitRoutingQuantV2TilingData moeInitRoutingQuantV2TilingData_
         ) : problemShape(problemShape_),
             EP(EP_), listLen(listLen_), expertPerRank(expertPerRank_), maxOutputSize(maxOutputSize_),
-            rank(rank_), rankSize(rankSize_), ubMoveNum(ubMoveNum_), hcclContext(hcclContext_), topK(topK_),
+            rank(rank_), rankSize(rankSize_), ubMoveNum(ubMoveNum_), remoteWindowContext(remoteWindowContext_), topK(topK_),
             initRoutingQuantTilingKey(initRoutingQuantTilingKey_),
             epilogueCoreNum(epilogueCoreNum_), epilogueGranularity(epilogueGranularity_),
             ptrA(reinterpret_cast<__gm__ ElementA *>(ptrA_)), layoutA(layoutA_), layoutA2(layoutA2_),
@@ -262,9 +262,9 @@ public:
 
 private:
     PTO_DEVICE void initBuffer(Params const &params) {
-        hcclWindow.InitWindow(params.hcclContext);
+        remoteWindow.Init(params.remoteWindowContext);
         workspaceInfo = WorkspaceInfo(params);
-        peerMemoryLayout = PeerMemoryLayout(params, hcclWindow);
+        peerMemoryLayout = PeerMemoryLayout(params, remoteWindow);
         cumsumMM.SetGlobalBuffer(reinterpret_cast<__gm__ int32_t*>(workspaceInfo.ptrcumsumMM));
         gmA.SetGlobalBuffer(reinterpret_cast<__gm__ ElementA *>(workspaceInfo.ptrA));
         gmC.SetGlobalBuffer(reinterpret_cast<__gm__ ElementC *>(workspaceInfo.ptrC));
@@ -272,7 +272,7 @@ private:
         gmC2.SetGlobalBuffer(reinterpret_cast<__gm__ ElementC *>(workspaceInfo.ptrC2));
         gmPerTokenScale1.SetGlobalBuffer(reinterpret_cast<__gm__ ElementPerTokenScale *>(workspaceInfo.ptrPerTokenScale));
         gmPerTokenScale2.SetGlobalBuffer(reinterpret_cast<__gm__ ElementPerTokenScale *>(workspaceInfo.ptrPerTokenScale2));
-        tokenPerExpert.SetGlobalBuffer(reinterpret_cast<__gm__ int32_t *>(hcclWindow() + peerMemoryLayout.offsetPeerTokenPerExpert));
+        tokenPerExpert.SetGlobalBuffer(reinterpret_cast<__gm__ int32_t *>(remoteWindow() + peerMemoryLayout.offsetPeerTokenPerExpert));
         paddedExpertNumAligned = AlignUp(params.EP * params.expertPerRank + 1, ALIGN_128);
         tokenPerExpertLayout = Layout3D(paddedExpertNumAligned, params.expertPerRank);
         preSumBeforeRank.SetGlobalBuffer(reinterpret_cast<__gm__ int32_t*>(workspaceInfo.ptrSumBeforeRank));
@@ -355,7 +355,7 @@ private:
         constexpr int32_t packedTileCols = 1024;
         uint32_t copyInNum = hiddenSize + UB_ALIGN;
         auto processCount = CeilDiv(rows, ubMoveNum);
-        __gm__ T* localPackedScratch = reinterpret_cast<__gm__ T*>(hcclWindow() + peerMemoryLayout.offsetPeerPerTokenScale);
+        __gm__ T* localPackedScratch = reinterpret_cast<__gm__ T*>(remoteWindow() + peerMemoryLayout.offsetPeerPerTokenScale);
         AscendC::GlobalTensor<T> localPackedScratchGm;
         localPackedScratchGm.SetGlobalBuffer(localPackedScratch);
 
@@ -703,18 +703,18 @@ private:
         AscendC::LocalTensor<int32_t> tmpBuffer = resource.ubBuf.template GetBufferByByte<int32_t>(0);
         AscendC::LocalTensor<int32_t> prevSumBuf = tmpBuffer[numPerCore];
 
-        hcclWindow.ResetLocalTokenReady();
+        remoteWindow.ResetLocalTokenReady();
         AscendC::SyncAll<true>();
-        hcclWindow.CrossRankSync();
+        remoteWindow.CrossRankSync();
 
         for(int32_t dstEpIdx = coreIdx; dstEpIdx < params.EP; dstEpIdx += coreNum) {
             if (dstEpIdx == params.rank) {
                 continue;
             }
             AscendC::GlobalTensor<int32_t> srcAddress;
-            srcAddress.SetGlobalBuffer(reinterpret_cast<__gm__ int32_t*>(hcclWindow() + localTokenPerExpertOffset));
+            srcAddress.SetGlobalBuffer(reinterpret_cast<__gm__ int32_t*>(remoteWindow() + localTokenPerExpertOffset));
             AscendC::GlobalTensor<int32_t> dstAddress;
-            __gm__ void* dstPeermemPtr = hcclWindow(localTokenPerExpertOffset, dstEpIdx);
+            __gm__ void* dstPeermemPtr = remoteWindow(localTokenPerExpertOffset, dstEpIdx);
             dstAddress.SetGlobalBuffer((__gm__ int32_t * )dstPeermemPtr);
 
             AscendC::SetFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID0);
@@ -723,7 +723,7 @@ private:
             using TputGlobal = pto::GlobalTensor<int32_t, ShapeDyn, StrideDyn, pto::Layout::ND>;
             using TputTile = pto::Tile<pto::TileType::Vec, int32_t, 1, 128, pto::BLayout::RowMajor, -1, -1>;
             int64_t scratchOffsetBytes = peerMemoryLayout.offsetPeerPerTokenScale + static_cast<int64_t>(coreIdx) * numPerCore * sizeof(int32_t);
-            __gm__ int32_t* localScratch = reinterpret_cast<__gm__ int32_t*>(hcclWindow(scratchOffsetBytes, params.rank));
+            __gm__ int32_t* localScratch = reinterpret_cast<__gm__ int32_t*>(remoteWindow(scratchOffsetBytes, params.rank));
             AscendC::GlobalTensor<int32_t> localScratchGm;
             localScratchGm.SetGlobalBuffer(localScratch);
             ShapeDyn tputShape(1, 1, 1, 1, numPerCore);
@@ -745,11 +745,11 @@ private:
             pto::comm::TPUT(remotePackedG, localPackedG, tputTile);
             AscendC::SetFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID0);
             AscendC::WaitFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID0);
-            hcclWindow.NotifyRemoteTokenReady(dstEpIdx);
+            remoteWindow.NotifyRemoteTokenReady(dstEpIdx);
         }
         for(int32_t dstEpIdx = coreIdx; dstEpIdx < params.EP; dstEpIdx += coreNum) {
             if (dstEpIdx != params.rank) {
-                hcclWindow.WaitTokenReady(dstEpIdx);
+                remoteWindow.WaitTokenReady(dstEpIdx);
                 AscendC::DataCopy(tmpBuffer, tokenPerExpert[tokenPerExpertLayout(dstEpIdx, 0, 0)], numPerCore);
                 AscendC::SetFlag<AscendC::HardEvent::MTE2_V>(EVENT_ID0);
                 AscendC::WaitFlag<AscendC::HardEvent::MTE2_V>(EVENT_ID0);
@@ -845,16 +845,16 @@ private:
     void DispatchAndCombine(Params const &params) {
         icache_preload(8);
         int64_t localTokenPerExpertOffset = peerMemoryLayout.offsetPeerTokenPerExpert + tokenPerExpertLayout(params.rank, 0, 0) * sizeof(int32_t);
-        GM_ADDR localTokenPerExpert = hcclWindow() + localTokenPerExpertOffset;     // Place the entire communication matrix in peermem
+        GM_ADDR localTokenPerExpert = remoteWindow() + localTokenPerExpertOffset;     // Place the entire communication matrix in peermem
         uint32_t expandedRowIdxOffset = AlignUp(GetPtoShapeM(params.problemShape), 256) * params.topK * sizeof(int32_t);
 
         ApplyXActiveMask(params);
 
         //---initRouting------
         moe_init_routing_quant_v2<ElementD2>(reinterpret_cast<GM_ADDR> (params.ptrA), params.expertIdx, 
-        params.moeInitRoutingQuantV2Scale, params.moeInitRoutingQuantV2Offset, hcclWindow() + peerMemoryLayout.offsetA, 
+        params.moeInitRoutingQuantV2Scale, params.moeInitRoutingQuantV2Offset, remoteWindow() + peerMemoryLayout.offsetA, 
         workspaceInfo.expandedRowIdx, localTokenPerExpert, params.expertTokensBeforeCapacity, 
-        hcclWindow() + peerMemoryLayout.offsetPeerPerTokenScale, 
+        remoteWindow() + peerMemoryLayout.offsetPeerPerTokenScale, 
         params.ptrWorkspace + expandedRowIdxOffset, 
         &params.moeInitRoutingQuantV2TilingData, params.initRoutingQuantTilingKey);
 
@@ -903,7 +903,7 @@ private:
                     }
                     uint32_t rowSrc = prevSum;
                     prevSum += rows;
-                    GM_ADDR otherRankPtr = hcclWindow(0, dstEpIdx);
+                    GM_ADDR otherRankPtr = remoteWindow(0, dstEpIdx);
                     __gm__ ElementA* remotePackedRows = reinterpret_cast<__gm__ ElementA*>(otherRankPtr + peerMemoryLayout.offsetA);
                     auto offsetA = MakePtoCoord2D(rowStart, 0);
                     int64_t gmOffsetA = params.layoutA.GetOffset(offsetA);
@@ -946,10 +946,10 @@ private:
         typename BlockEpilogue2::Params epilogueParams2{
             static_cast<int32_t>(params.EP),
             static_cast<int32_t>(params.expertPerRank),
-            reinterpret_cast<__gm__ int32_t *>(hcclWindow() + peerMemoryLayout.offsetPeerTokenPerExpert),
+            reinterpret_cast<__gm__ int32_t *>(remoteWindow() + peerMemoryLayout.offsetPeerTokenPerExpert),
             static_cast<int32_t>(n2),
             static_cast<int32_t>(params.rank),
-            hcclWindow,
+            remoteWindow,
             static_cast<int32_t>(peerMemoryLayout.offsetPeerPerTokenScale)
         };
 
@@ -957,11 +957,11 @@ private:
             static_cast<int32_t>(params.EP),
             static_cast<int32_t>(params.expertPerRank),
             static_cast<int32_t>(params.rank),
-            reinterpret_cast<__gm__ int32_t *>(hcclWindow() + peerMemoryLayout.offsetPeerTokenPerExpert),
+            reinterpret_cast<__gm__ int32_t *>(remoteWindow() + peerMemoryLayout.offsetPeerTokenPerExpert),
             params.layoutD2,
             static_cast<int32_t>(n2),
             static_cast<int32_t>(L1TileShape::N),
-            hcclWindow,
+            remoteWindow,
             static_cast<int32_t>(peerMemoryLayout.offsetD),
             static_cast<int32_t>(peerMemoryLayout.offsetPeerPerTokenScale),
             tokenPerExpertLayout
@@ -1021,12 +1021,12 @@ private:
         AscendC::SyncAll<true>();
         ResetTokenPerExpert(params.EP * paddedExpertNumAligned);
 
-        hcclWindow.CrossRankSync();
+        remoteWindow.CrossRankSync();
 
         MoeTokenUnpermuteTilingData tilingData;
         MoeTokenUnpermuteTiling(GetPtoShapeM(params.problemShape) * params.topK, n2, params.topK, tilingData, coreNum);
         KernelMoeTokenUnpermute<ElementD2, int32_t, float, true> kernelMoeTokenUnpermuteOp;
-        kernelMoeTokenUnpermuteOp.Init(hcclWindow() + peerMemoryLayout.offsetD, workspaceInfo.expandedRowIdx, params.probs, reinterpret_cast<GM_ADDR>(params.ptrOutput), &tilingData);
+        kernelMoeTokenUnpermuteOp.Init(remoteWindow() + peerMemoryLayout.offsetD, workspaceInfo.expandedRowIdx, params.probs, reinterpret_cast<GM_ADDR>(params.ptrOutput), &tilingData);
         kernelMoeTokenUnpermuteOp.Process();
     }
 
@@ -1044,7 +1044,7 @@ private:
             uint32_t groupIdx = t_groupIdx;
 
             for(int32_t dstEpIdx = coreIdx; dstEpIdx < params.EP; dstEpIdx += coreNum) {
-                __gm__ void* dstPeermemPtr = hcclWindow(peerMemoryLayout.offsetD, dstEpIdx);
+                __gm__ void* dstPeermemPtr = remoteWindow(peerMemoryLayout.offsetD, dstEpIdx);
                 uint32_t srcRowOffset = (dstEpIdx == 0 ? 0 : cumsumMM((dstEpIdx - 1) * params.expertPerRank + groupIdx)) + prevGroupSum2;
                 if (srcRowOffset < params.maxOutputSize) {
                     uint32_t dataRows = tokenPerExpert(tokenPerExpertLayout(dstEpIdx, params.rank, groupIdx));
@@ -1206,11 +1206,11 @@ private:
         PeerMemoryLayout(){}
 
         PTO_DEVICE
-        PeerMemoryLayout(const Params & params, const HcclWindow &hcclWindow) {
+        PeerMemoryLayout(const Params & params, const PtoRemoteWindow &remoteWindow) {
             offsetA = 0;    // Occupies one third of BUFFSIZE
-            offsetPeerPerTokenScale = offsetA + AlignUp(hcclWindow.SegmentSize() / 3, 512); // Occupies 1 MB
+            offsetPeerPerTokenScale = offsetA + AlignUp(remoteWindow.SegmentSize() / 3, 512); // Occupies 1 MB
             offsetD = offsetPeerPerTokenScale + MB_SIZE;    // Occupies the remaining space
-            offsetPeerTokenPerExpert = hcclWindow.SegmentSize() - 2 * MB_SIZE;     // Occupies the final 2 MB
+            offsetPeerTokenPerExpert = remoteWindow.SegmentSize() - 2 * MB_SIZE;     // Occupies the final 2 MB
         }
     };
 
@@ -1237,7 +1237,7 @@ private:
     AscendC::GlobalTensor<int32_t> cumsumMM;
     AscendC::GlobalTensor<int32_t> preSumBeforeRank;
     Layout3D tokenPerExpertLayout;
-    HcclWindow hcclWindow;
+    PtoRemoteWindow remoteWindow;
     int32_t paddedExpertNumAligned;
     bool isCombineV1;
 };

@@ -113,7 +113,7 @@ __aicore__ inline void MoeV2Mrgsort::CopyIn() {
   for (int64_t i = 0, j = 0; i < listNum; i++) {
     lengths[i] = Min(param->oneLoopMaxElements, listRemainElements[i]);
     if (lengths[i] > 0) {
-      DataCopy(this->ubInputs[i], this->gmInputs[i][offsets[i]], Align(GetSortLen<float>(lengths[i]), sizeof(float)));
+      pto_detail::PtoLoadVector(this->ubInputs[i], this->gmInputs[i][offsets[i]], GetSortLen<float>(lengths[i]));
       tmpUbInputs[j] = this->ubInputs[i];
       elementCountListTail[j] = lengths[i];
       this->remainListNum += 1;
@@ -135,7 +135,7 @@ __aicore__ inline void MoeV2Mrgsort::MrgsortCompute() {
                                           this->remainListNum,
                                           this->listSortedNums);
   } else {
-    DataCopy(this->ubOutput, this->tmpUbInputs[0], Align(GetSortLen<float>(elementCountListTail[0]), sizeof(float)));
+    pto_detail::PtoMoveVector(this->ubOutput, this->tmpUbInputs[0], GetSortLen<float>(elementCountListTail[0]));
     listSortedNums[0] = elementCountListTail[0];
   }
 }
@@ -157,11 +157,8 @@ __aicore__ inline void MoeV2Mrgsort::UpdateSortInfo() {
 }
 
 __aicore__ inline void MoeV2Mrgsort::CopyOut() {
-  DataCopyParams intriParams;
-  intriParams.blockCount = 1;
-  intriParams.blockLen = GetSortLen<float>(curLoopSortedNum) * sizeof(float);
   SetWaitFlag<HardEvent::V_MTE3>(HardEvent::V_MTE3);
-  DataCopyPad(this->gmOutput[outOffset], this->ubOutput, intriParams);
+  pto_detail::PtoStoreVector(this->gmOutput[outOffset], this->ubOutput, GetSortLen<float>(curLoopSortedNum));
   outOffset += GetSortLen<float>(curLoopSortedNum);
 }
 

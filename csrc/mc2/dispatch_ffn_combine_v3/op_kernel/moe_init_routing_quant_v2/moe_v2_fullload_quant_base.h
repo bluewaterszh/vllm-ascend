@@ -83,10 +83,7 @@ class MoeV2FullLoadQuantBase {
 
 __aicore__ inline void MoeV2FullLoadQuantBase::CopyIn() {
   LocalTensor<int32_t> inLocal = sortDataCopyInQueue.AllocTensor<int32_t>();
-  DataCopyExtParams dataCopyParams{static_cast<uint16_t>(1), static_cast<uint32_t>(this->totalLength * sizeof(int32_t)),
-                                   0, 0, 0};
-  DataCopyPadExtParams<int32_t> dataCopyPadParams{false, 0, 0, 0};
-  DataCopyPad(inLocal[0], expertIdxGm, dataCopyParams, dataCopyPadParams);
+  pto_detail::PtoLoadVector(inLocal[0], expertIdxGm, this->totalLength);
   ArithProgression<int32_t>(inLocal[this->sortNum], 0, 1, this->totalLength);
   sortDataCopyInQueue.EnQue(inLocal);
 }
@@ -130,10 +127,7 @@ __aicore__ inline void MoeV2FullLoadQuantBase::SortCompute() {
 
 __aicore__ inline void MoeV2FullLoadQuantBase::CopyOutIdx() {
   LocalTensor<int32_t> expandedRowIdx = expandedRowIdxCopyOutQueue.DeQue<int32_t>();
-  DataCopyParams intriParams;
-  intriParams.blockCount = 1;
-  intriParams.blockLen = this->totalLength * sizeof(int32_t);
-  DataCopyPad(expandedRowIdxGm, expandedRowIdx, intriParams);
+  pto_detail::PtoStoreVector(expandedRowIdxGm, expandedRowIdx, this->totalLength);
   expandedRowIdxCopyOutQueue.EnQue(expandedRowIdx);
 }
 
@@ -167,10 +161,8 @@ __aicore__ inline void MoeV2FullLoadQuantBase::ComputeExpertTokenCountOrCumsum()
       lastExpertId++;
     }
   }
-  DataCopyExtParams copyParams{static_cast<uint16_t>(1), static_cast<uint32_t>(this->expertNum * sizeof(int32_t)), 0, 0,
-                               0};
   if (this->expertTokensCountOrCumsumFlag > 0) {
-    DataCopyPad(expertTokensCountOrCumsumGm, expertTokensCount, copyParams);
+    pto_detail::PtoStoreVector(expertTokensCountOrCumsumGm, expertTokensCount, this->expertNum);
   }
   expertTokensCopyOutQueue.FreeTensor(expertTokensCount);
   expandedExpertIdxCopyOutQueue.FreeTensor(expandedExpertIdx);
