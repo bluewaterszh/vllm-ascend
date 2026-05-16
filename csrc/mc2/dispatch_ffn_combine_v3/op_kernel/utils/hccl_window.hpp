@@ -1,5 +1,5 @@
-#ifndef SYNC_UTIL_HPP
-#define SYNC_UTIL_HPP
+#ifndef HCCL_WINDOW_HPP
+#define HCCL_WINDOW_HPP
 
 #include "kernel_operator.h"
 #include "const_args.hpp"
@@ -9,7 +9,7 @@
 
 #define FORCE_INLINE_AICORE inline __attribute__((always_inline)) __aicore__
 constexpr int32_t MAX_RANK_SIZE = 32;
-constexpr int32_t SHMEM_MEM = 700 * MB_SIZE;
+constexpr int32_t HCCL_WINDOW_MEM = 700 * MB_SIZE;
 
 constexpr uint32_t BARRIER_COUNTER_STRIDE = 16;
 constexpr uint32_t BARRIER_EPOCH_INDEX = 2048;
@@ -40,11 +40,11 @@ FORCE_INLINE_AICORE void gm_dcci(__gm__ T *addr)
     __asm__ __volatile__("");
 }
 
-class HcclShmem {
+class HcclWindow {
 public:
-    FORCE_INLINE_AICORE HcclShmem() { segmentBytes_ = SHMEM_MEM; }
+    FORCE_INLINE_AICORE HcclWindow() { segmentBytes_ = HCCL_WINDOW_MEM; }
 
-    FORCE_INLINE_AICORE void initShmem(GM_ADDR hcclContext)
+    FORCE_INLINE_AICORE void InitWindow(GM_ADDR hcclContext)
     {
         hcclCtx_ = reinterpret_cast<__gm__ HcclDeviceContext *>(hcclContext);
         rank_ = static_cast<int32_t>(hcclCtx_->rankId);

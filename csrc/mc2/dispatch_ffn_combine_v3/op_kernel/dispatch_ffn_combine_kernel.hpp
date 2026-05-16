@@ -23,7 +23,7 @@
 #include "utils/block_epilogue_pertoken_row.hpp"
 #include "utils/block_epilogue_pertoken_v2.hpp"
 #include "utils/block_epilogue_pertoken_swiglu.hpp"
-#include "utils/hccl_shmem.hpp"
+#include "utils/hccl_window.hpp"
 #include "utils/const_args.hpp"
 #include "utils/layout3d.hpp"
 #include "moe_init_routing_quant_v2/moe_init_routing_quant_v2_tiling.h"
@@ -262,9 +262,9 @@ public:
 
 private:
     PTO_DEVICE void initBuffer(Params const &params) {
-        shmem.initShmem(params.hcclContext);
+        hcclWindow.InitWindow(params.hcclContext);
         workspaceInfo = WorkspaceInfo(params);
-        peerMemoryLayout = PeerMemoryLayout(params, shmem);
+        peerMemoryLayout = PeerMemoryLayout(params, hcclWindow);
         cumsumMM.SetGlobalBuffer(reinterpret_cast<__gm__ int32_t*>(workspaceInfo.ptrcumsumMM));
         gmA.SetGlobalBuffer(reinterpret_cast<__gm__ ElementA *>(workspaceInfo.ptrA));
         gmC.SetGlobalBuffer(reinterpret_cast<__gm__ ElementC *>(workspaceInfo.ptrC));
@@ -272,7 +272,7 @@ private:
         gmC2.SetGlobalBuffer(reinterpret_cast<__gm__ ElementC *>(workspaceInfo.ptrC2));
         gmPerTokenScale1.SetGlobalBuffer(reinterpret_cast<__gm__ ElementPerTokenScale *>(workspaceInfo.ptrPerTokenScale));
         gmPerTokenScale2.SetGlobalBuffer(reinterpret_cast<__gm__ ElementPerTokenScale *>(workspaceInfo.ptrPerTokenScale2));
-        tokenPerExpert.SetGlobalBuffer(reinterpret_cast<__gm__ int32_t *>(shmem() + peerMemoryLayout.offsetPeerTokenPerExpert));
+        tokenPerExpert.SetGlobalBuffer(reinterpret_cast<__gm__ int32_t *>(hcclWindow() + peerMemoryLayout.offsetPeerTokenPerExpert));
         paddedExpertNumAligned = AlignUp(params.EP * params.expertPerRank + 1, ALIGN_128);
         tokenPerExpertLayout = Layout3D(paddedExpertNumAligned, params.expertPerRank);
         preSumBeforeRank.SetGlobalBuffer(reinterpret_cast<__gm__ int32_t*>(workspaceInfo.ptrSumBeforeRank));
@@ -355,7 +355,7 @@ private:
         constexpr int32_t packedTileCols = 1024;
         uint32_t copyInNum = hiddenSize + UB_ALIGN;
         auto processCount = CeilDiv(rows, ubMoveNum);
-        __gm__ T* localPackedScratch = reinterpret_cast<__gm__ T*>(shmem() + peerMemoryLayout.offsetPeerPerTokenScale);
+        __gm__ T* localPackedScratch = reinterpret_cast<__gm__ T*>(hcclWindow() + peerMemoryLayout.offsetPeerPerTokenScale);
         AscendC::GlobalTensor<T> localPackedScratchGm;
         localPackedScratchGm.SetGlobalBuffer(localPackedScratch);
 
@@ -703,18 +703,18 @@ private:
         AscendC::LocalTensor<int32_t> tmpBuffer = resource.ubBuf.template GetBufferByByte<int32_t>(0);
         AscendC::LocalTensor<int32_t> prevSumBuf = tmpBuffer[numPerCore];
 
-        shmem.ResetLocalTokenReady();
+        hcclWindow.ResetLocalTokenReady();
         AscendC::SyncAll<true>();
-        shmem.CrossRankSync();
+        hcclWindow.CrossRankSync();
 
         for(int32_t dstEpIdx = coreIdx; dstEpIdx < params.EP; dstEpIdx += coreNum) {
             if (dstEpIdx == params.rank) {
                 continue;
             }
             AscendC::GlobalTensor<int32_t> srcAddress;
-            srcAddress.SetGlobalBuffer(reinterpret_cast<__gm__ int32_t*>(shmem() + localTokenPerExpertOffset));
+            srcAddress.SetGlobalBuffer(reinterpret_cast<__gm__ int32_t*>(hcclWindow() + localTokenPerExpertOffset));
             AscendC::GlobalTensor<int32_t> dstAddress;
-            __gm__ void* dstPeermemPtr = shmem(localTokenPerExpertOffset, dstEpIdx);
+            __gm__ void* dstPeermemPtr = hcclWindow(localTokenPerExpertOffset, dstEpIdx);
             dstAddress.SetGlobalBuffer((__gm__ int32_t * )dstPeermemPtr);
 
             AscendC::SetFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID0);
@@ -723,7 +723,7 @@ private:
             using TputGlobal = pto::GlobalTensor<int32_t, ShapeDyn, StrideDyn, pto::Layout::ND>;
             using TputTile = pto::Tile<pto::TileType::Vec, int32_t, 1, 128, pto::BLayout::RowMajor, -1, -1>;
             int64_t scratchOffsetBytes = peerMemoryLayout.offsetPeerPerTokenScale + static_cast<int64_t>(coreIdx) * numPerCore * sizeof(int32_t);
-            __gm__ int32_t* localScratch = reinterpret_cast<__gm__ int32_t*>(shmem(scratchOffsetBytes, params.rank));
+            __gm__ int32_t* localScratch = reinterpret_cast<__gm__ int32_t*>(hcclWindow(scratchOffsetBytes, params.rank));
             AscendC::GlobalTensor<int32_t> localScratchGm;
             localScratchGm.SetGlobalBuffer(localScratch);
             ShapeDyn tputShape(1, 1, 1, 1, numPerCore);
@@ -745,11 +745,11 @@ private:
             pto::comm::TPUT(remotePackedG, localPackedG, tputTile);
             AscendC::SetFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID0);
             AscendC::WaitFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID0);
-            shmem.NotifyRemoteTokenReady(dstEpIdx);
+            hcclWindow.NotifyRemoteTokenReady(dstEpIdx);
         }
         for(int32_t dstEpIdx = coreIdx; dstEpIdx < params.EP; dstEpIdx += coreNum) {
             if (dstEpIdx != params.rank) {
-                shmem.WaitTokenReady(dstEpIdx);
+                hcclWindow.WaitTokenReady(dstEpIdx);
                 AscendC::DataCopy(tmpBuffer, tokenPerExpert[tokenPerExpertLayout(dstEpIdx, 0, 0)], numPerCore);
                 AscendC::SetFlag<AscendC::HardEvent::MTE2_V>(EVENT_ID0);
                 AscendC::WaitFlag<AscendC::HardEvent::MTE2_V>(EVENT_ID0);
@@ -845,16 +845,16 @@ private:
     void DispatchAndCombine(Params const &params) {
         icache_preload(8);
         int64_t localTokenPerExpertOffset = peerMemoryLayout.offsetPeerTokenPerExpert + tokenPerExpertLayout(params.rank, 0, 0) * sizeof(int32_t);
-        GM_ADDR localTokenPerExpert = shmem() + localTokenPerExpertOffset;     // Place the entire communication matrix in peermem
+        GM_ADDR localTokenPerExpert = hcclWindow() + localTokenPerExpertOffset;     // Place the entire communication matrix in peermem
         uint32_t expandedRowIdxOffset = AlignUp(GetPtoShapeM(params.problemShape), 256) * params.topK * sizeof(int32_t);
 
         ApplyXActiveMask(params);
 
         //---initRouting------
         moe_init_routing_quant_v2<ElementD2>(reinterpret_cast<GM_ADDR> (params.ptrA), params.expertIdx, 
-        params.moeInitRoutingQuantV2Scale, params.moeInitRoutingQuantV2Offset, shmem() + peerMemoryLayout.offsetA, 
+        params.moeInitRoutingQuantV2Scale, params.moeInitRoutingQuantV2Offset, hcclWindow() + peerMemoryLayout.offsetA, 
         workspaceInfo.expandedRowIdx, localTokenPerExpert, params.expertTokensBeforeCapacity, 
-        shmem() + peerMemoryLayout.offsetPeerPerTokenScale, 
+        hcclWindow() + peerMemoryLayout.offsetPeerPerTokenScale, 
         params.ptrWorkspace + expandedRowIdxOffset, 
         &params.moeInitRoutingQuantV2TilingData, params.initRoutingQuantTilingKey);
 
@@ -903,7 +903,7 @@ private:
                     }
                     uint32_t rowSrc = prevSum;
                     prevSum += rows;
-                    GM_ADDR otherRankPtr = shmem(0, dstEpIdx);
+                    GM_ADDR otherRankPtr = hcclWindow(0, dstEpIdx);
                     __gm__ ElementA* remotePackedRows = reinterpret_cast<__gm__ ElementA*>(otherRankPtr + peerMemoryLayout.offsetA);
                     auto offsetA = MakePtoCoord2D(rowStart, 0);
                     int64_t gmOffsetA = params.layoutA.GetOffset(offsetA);
@@ -946,10 +946,10 @@ private:
         typename BlockEpilogue2::Params epilogueParams2{
             static_cast<int32_t>(params.EP),
             static_cast<int32_t>(params.expertPerRank),
-            reinterpret_cast<__gm__ int32_t *>(shmem() + peerMemoryLayout.offsetPeerTokenPerExpert),
+            reinterpret_cast<__gm__ int32_t *>(hcclWindow() + peerMemoryLayout.offsetPeerTokenPerExpert),
             static_cast<int32_t>(n2),
             static_cast<int32_t>(params.rank),
-            shmem,
+            hcclWindow,
             static_cast<int32_t>(peerMemoryLayout.offsetPeerPerTokenScale)
         };
 
@@ -957,11 +957,11 @@ private:
             static_cast<int32_t>(params.EP),
             static_cast<int32_t>(params.expertPerRank),
             static_cast<int32_t>(params.rank),
-            reinterpret_cast<__gm__ int32_t *>(shmem() + peerMemoryLayout.offsetPeerTokenPerExpert),
+            reinterpret_cast<__gm__ int32_t *>(hcclWindow() + peerMemoryLayout.offsetPeerTokenPerExpert),
             params.layoutD2,
             static_cast<int32_t>(n2),
             static_cast<int32_t>(L1TileShape::N),
-            shmem,
+            hcclWindow,
             static_cast<int32_t>(peerMemoryLayout.offsetD),
             static_cast<int32_t>(peerMemoryLayout.offsetPeerPerTokenScale),
             tokenPerExpertLayout
@@ -1021,12 +1021,12 @@ private:
         AscendC::SyncAll<true>();
         ResetTokenPerExpert(params.EP * paddedExpertNumAligned);
 
-        shmem.CrossRankSync();
+        hcclWindow.CrossRankSync();
 
         MoeTokenUnpermuteTilingData tilingData;
         MoeTokenUnpermuteTiling(GetPtoShapeM(params.problemShape) * params.topK, n2, params.topK, tilingData, coreNum);
         KernelMoeTokenUnpermute<ElementD2, int32_t, float, true> kernelMoeTokenUnpermuteOp;
-        kernelMoeTokenUnpermuteOp.Init(shmem() + peerMemoryLayout.offsetD, workspaceInfo.expandedRowIdx, params.probs, reinterpret_cast<GM_ADDR>(params.ptrOutput), &tilingData);
+        kernelMoeTokenUnpermuteOp.Init(hcclWindow() + peerMemoryLayout.offsetD, workspaceInfo.expandedRowIdx, params.probs, reinterpret_cast<GM_ADDR>(params.ptrOutput), &tilingData);
         kernelMoeTokenUnpermuteOp.Process();
     }
 
@@ -1044,7 +1044,7 @@ private:
             uint32_t groupIdx = t_groupIdx;
 
             for(int32_t dstEpIdx = coreIdx; dstEpIdx < params.EP; dstEpIdx += coreNum) {
-                __gm__ void* dstPeermemPtr = shmem(peerMemoryLayout.offsetD, dstEpIdx);
+                __gm__ void* dstPeermemPtr = hcclWindow(peerMemoryLayout.offsetD, dstEpIdx);
                 uint32_t srcRowOffset = (dstEpIdx == 0 ? 0 : cumsumMM((dstEpIdx - 1) * params.expertPerRank + groupIdx)) + prevGroupSum2;
                 if (srcRowOffset < params.maxOutputSize) {
                     uint32_t dataRows = tokenPerExpert(tokenPerExpertLayout(dstEpIdx, params.rank, groupIdx));
@@ -1206,11 +1206,11 @@ private:
         PeerMemoryLayout(){}
 
         PTO_DEVICE
-        PeerMemoryLayout(const Params & params, const HcclShmem & shmem) {
+        PeerMemoryLayout(const Params & params, const HcclWindow &hcclWindow) {
             offsetA = 0;    // Occupies one third of BUFFSIZE
-            offsetPeerPerTokenScale = offsetA + AlignUp(shmem.SegmentSize() / 3, 512); // Occupies 1 MB
+            offsetPeerPerTokenScale = offsetA + AlignUp(hcclWindow.SegmentSize() / 3, 512); // Occupies 1 MB
             offsetD = offsetPeerPerTokenScale + MB_SIZE;    // Occupies the remaining space
-            offsetPeerTokenPerExpert = shmem.SegmentSize() - 2 * MB_SIZE;     // Occupies the final 2 MB
+            offsetPeerTokenPerExpert = hcclWindow.SegmentSize() - 2 * MB_SIZE;     // Occupies the final 2 MB
         }
     };
 
@@ -1237,7 +1237,7 @@ private:
     AscendC::GlobalTensor<int32_t> cumsumMM;
     AscendC::GlobalTensor<int32_t> preSumBeforeRank;
     Layout3D tokenPerExpertLayout;
-    HcclShmem shmem;
+    HcclWindow hcclWindow;
     int32_t paddedExpertNumAligned;
     bool isCombineV1;
 };

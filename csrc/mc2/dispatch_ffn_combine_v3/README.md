@@ -93,7 +93,7 @@ These are equivalent metrics derived from the routed workload. They are useful f
 
 Reference commits:
 - baseline before PTO-style HCCL context: `f7bf62cb`
-- Stage 1 HCCL context / shmem migration: `5db0ebc7`
+- Stage 1 HCCL context / window migration: `5db0ebc7`
 
 Reference case:
 
@@ -415,7 +415,7 @@ Interpretation:
 Current status:
 - `dispatch_ffn_combine_v3` no longer keeps a separate `HCCL_COMM` kernel path.
 - The runtime now reconstructs a shared PTO-style `HcclDeviceContext` on the host side and passes that unified context into the kernel.
-- The device-side shmem path now reads rank/window metadata only from that simplified context instead of parsing the old HCCL-internal resource layout in-kernel.
+- The device-side HCCL window path now reads rank/window metadata only from that simplified context instead of parsing the old HCCL-internal resource layout in-kernel.
 - The local legacy compat naming in the live path has also been renamed to PTO-style local naming.
 - A fresh rebuild after this cleanup still keeps both reference cases at `PASS`.
 
@@ -564,7 +564,7 @@ Interpretation:
 ## PTO comm-signal checkpoint
 
 Current status:
-- `op_kernel/utils/hccl_shmem.hpp` now expresses the live token-ready and cross-rank barrier behavior directly in terms of `pto::comm::Signal`, `TNOTIFY`, and `TWAIT` at the call site instead of routing those paths through an extra local wait/notify helper layer.
+- `op_kernel/utils/hccl_window.hpp` now expresses the live token-ready and cross-rank barrier behavior directly in terms of `pto::comm::Signal`, `TNOTIFY`, and `TWAIT` at the call site instead of routing those paths through an extra local wait/notify helper layer.
 - The signal-region layout, epoch counters, and peer-window offsets are unchanged; this batch only shrinks the protocol-expression shell around them.
 - The temporary lvalue requirement of PTO comm primitives is handled locally by binding the signal objects before `TNOTIFY/TWAIT`, so the live call sites stay PTO-native without changing the memory contract.
 - A fresh rebuild after this comm-signal cleanup still keeps both reference cases at `PASS`.

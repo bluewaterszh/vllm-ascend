@@ -16,7 +16,7 @@
 #include <pto/common/pto_tile.hpp>
 #include <pto/pto-inst.hpp>
 
-#include "hccl_shmem.hpp"
+#include "hccl_window.hpp"
 
 namespace pto_ext::Epilogue::Block {
 namespace row_detail {
@@ -118,15 +118,15 @@ public:
         int32_t expertPerRank;
         int32_t n2;
         int32_t rank;
-        HcclShmem shmem;
+        HcclWindow hcclWindow;
         int32_t scratchOffset;
 
         PTO_DEVICE
         Params() {};
 
         PTO_DEVICE
-        Params(int32_t EP_, int32_t expertPerRank_, __gm__ int32_t *ptrTokenPerExpert_, int32_t n2_, int32_t rank_, HcclShmem &shmem_, int32_t scratchOffset_) :
-            ptrTokenPerExpert(ptrTokenPerExpert_), EP(EP_), expertPerRank(expertPerRank_), n2(n2_), rank(rank_), shmem(shmem_), scratchOffset(scratchOffset_) {}
+        Params(int32_t EP_, int32_t expertPerRank_, __gm__ int32_t *ptrTokenPerExpert_, int32_t n2_, int32_t rank_, HcclWindow &hcclWindow_, int32_t scratchOffset_) :
+            ptrTokenPerExpert(ptrTokenPerExpert_), EP(EP_), expertPerRank(expertPerRank_), n2(n2_), rank(rank_), hcclWindow(hcclWindow_), scratchOffset(scratchOffset_) {}
     };
 
     PTO_DEVICE
@@ -203,7 +203,7 @@ public:
         constexpr uint32_t scratchCols = 1024;
         int32_t logicalSubCoreIdx = get_block_idx() + get_subblockid() * get_block_num();
         int64_t scratchOffsetBytes = params.scratchOffset + static_cast<int64_t>(logicalSubCoreIdx) * scratchCols * sizeof(ElementD);
-        __gm__ ElementD* localScratch = reinterpret_cast<__gm__ ElementD*>(params.shmem(scratchOffsetBytes, params.rank));
+        __gm__ ElementD* localScratch = reinterpret_cast<__gm__ ElementD*>(params.hcclWindow(scratchOffsetBytes, params.rank));
         AscendC::GlobalTensor<ElementD> gmLocalScratch;
         gmLocalScratch.SetGlobalBuffer(localScratch);
 
