@@ -42,10 +42,7 @@ class MoeV2SortOneCore : public MoeV2SortBase {
 
 __aicore__ inline void MoeV2SortOneCore::CopyIn() {
   LocalTensor<int32_t> inLocal = sortDataCopyInQueue.AllocTensor<int32_t>();
-  DataCopyExtParams dataCopyParams{static_cast<uint16_t>(1), static_cast<uint32_t>(this->totalLength * sizeof(int32_t)),
-                                   0, 0, 0};
-  DataCopyPadExtParams<int32_t> dataCopyPadParams{false, 0, 0, 0};
-  DataCopyPad(inLocal[0], expertIdxGm, dataCopyParams, dataCopyPadParams);
+  pto_detail::PtoLoadVector(inLocal[0], expertIdxGm, this->totalLength);
 
   LocalTensor<int32_t> rowIdxLocal = inLocal[this->sortNum];
   ArithProgression<int32_t>(rowIdxLocal, 0, 1, this->sortNum);
@@ -76,11 +73,8 @@ __aicore__ inline void MoeV2SortOneCore::SortCompute() {
 
 __aicore__ inline void MoeV2SortOneCore::CopyOut() {
   LocalTensor<int32_t> outLocal = sortDataCopyOutQueue.DeQue<int32_t>();
-  DataCopyParams intriParams;
-  intriParams.blockCount = 1;
-  intriParams.blockLen = this->totalLength * sizeof(int32_t);
-  DataCopyPad(sortedexpertIdxGm, outLocal[0], intriParams);
-  DataCopyPad(expandDstToSrcRowGm, outLocal[this->sortNum], intriParams);
+  pto_detail::PtoStoreVector(sortedexpertIdxGm, outLocal[0], this->totalLength);
+  pto_detail::PtoStoreVector(expandDstToSrcRowGm, outLocal[this->sortNum], this->totalLength);
   sortDataCopyOutQueue.FreeTensor(outLocal);
 }
 

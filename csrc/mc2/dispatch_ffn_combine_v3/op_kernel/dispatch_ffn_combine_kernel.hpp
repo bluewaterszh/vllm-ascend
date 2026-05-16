@@ -333,6 +333,53 @@ private:
     }
 
     template<typename T>
+    PTO_DEVICE void LoadPackedScratchToUb(AscendC::LocalTensor<T> dst,
+                                          AscendC::GlobalTensor<T> src,
+                                          uint32_t elemNum)
+    {
+        kernel_detail::PtoLoadVector(dst, src[0], elemNum);
+    }
+
+    template<typename T>
+    PTO_DEVICE void StorePerTokenRows(AscendC::GlobalTensor<T> dst,
+                                      AscendC::LocalTensor<T> src,
+                                      uint32_t outputOffset,
+                                      uint16_t rowNum,
+                                      uint16_t hiddenSize)
+    {
+        AscendC::DataCopyPad(dst[outputOffset], src, {rowNum, hiddenSize, 1, 0, 0});
+    }
+
+    PTO_DEVICE void StorePerTokenScales(AscendC::GlobalTensor<float> dstScale,
+                                        AscendC::LocalTensor<float> srcScale,
+                                        uint32_t outputOffset,
+                                        uint16_t rowNum,
+                                        uint16_t hiddenSize)
+    {
+        AscendC::DataCopyPad(dstScale[outputOffset],
+                             srcScale,
+                             {rowNum, static_cast<uint16_t>(sizeof(float)), static_cast<uint32_t>(hiddenSize / 32), 0, 0});
+    }
+
+    PTO_DEVICE void LoadExpertCountsPadded(AscendC::LocalTensor<int32_t> dst,
+                                           AscendC::GlobalTensor<int32_t> src,
+                                           uint32_t srcOffset,
+                                           uint16_t rowNum,
+                                           uint16_t copyBytes,
+                                           uint16_t padBytes)
+    {
+        AscendC::DataCopyPad(dst, src[srcOffset], {rowNum, copyBytes, padBytes, 0}, {});
+    }
+
+    PTO_DEVICE void StoreExpertCountsPadded(AscendC::GlobalTensor<int32_t> dst,
+                                            AscendC::LocalTensor<int32_t> src,
+                                            uint16_t rowNum,
+                                            uint16_t copyBytes)
+    {
+        AscendC::DataCopyPad(dst, src, {rowNum, copyBytes, 0, 0});
+    }
+
+    template<typename T>
     PTO_DEVICE void CopyGMToGMPerToken(
         AscendC::GlobalTensor<T> dst,
         AscendC::GlobalTensor<float> dstScale,
@@ -381,16 +428,17 @@ private:
 
             AscendC::WaitFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID);
             int64_t dataLen = rowNum * copyInNum;
-            AscendC::DataCopy(buf, localPackedScratchGm[0], dataLen);
+            LoadPackedScratchToUb(buf, localPackedScratchGm, dataLen);
 
             AscendC::SetFlag<AscendC::HardEvent::MTE2_MTE3>(EVENT_ID);
             AscendC::WaitFlag<AscendC::HardEvent::MTE2_MTE3>(EVENT_ID);
             auto outputOffset = processIndex * ubMoveNum * hiddenSize;
-            #define U16(x) static_cast<uint16_t>(x)
-            AscendC::DataCopyPad(dst[outputOffset],
-                buf, {U16(rowNum), U16(hiddenSize), 1, 0, 0});
-            AscendC::DataCopyPad(dstScale[processIndex * ubMoveNum],
-                bufScale, {U16(rowNum), U16(sizeof(float)), static_cast<uint32_t>(hiddenSize / 32), 0, 0});
+            StorePerTokenRows(dst, buf, outputOffset, static_cast<uint16_t>(rowNum), static_cast<uint16_t>(hiddenSize));
+            StorePerTokenScales(dstScale,
+                               bufScale,
+                               processIndex * ubMoveNum,
+                               static_cast<uint16_t>(rowNum),
+                               static_cast<uint16_t>(hiddenSize));
             AscendC::SetFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID);
         }
     }
@@ -419,9 +467,7 @@ private:
         AscendC::LocalTensor<int32_t> tmpExpertIdx = resource.ubBuf.template GetBufferByByte<int32_t>(0);
         int32_t copySize = endIdx - startIdx;
 
-        AscendC::DataCopyPad(tmpExpertIdx[0], expertIdxGm[startIdx], 
-                    {1, static_cast<uint16_t>(copySize * sizeof(int32_t)), 0, 0}, {}
-        );
+        kernel_detail::PtoLoadVector(tmpExpertIdx[0], expertIdxGm[startIdx], copySize);
 
         AscendC::SetFlag<AscendC::HardEvent::MTE2_S>(EVENT_ID0);
         AscendC::WaitFlag<AscendC::HardEvent::MTE2_S>(EVENT_ID0);
@@ -436,7 +482,7 @@ private:
 
         AscendC::SetFlag<AscendC::HardEvent::S_MTE3>(EVENT_ID0);
         AscendC::WaitFlag<AscendC::HardEvent::S_MTE3>(EVENT_ID0);
-        AscendC::DataCopyPad(expertIdxGm[startIdx], tmpExpertIdx[0], {1, static_cast<uint16_t>(copySize * sizeof(int32_t)), 0, 0, 0});
+        kernel_detail::PtoStoreVector(expertIdxGm[startIdx], tmpExpertIdx[0], copySize);
         AscendC::SyncAll<true>();
     }
 
@@ -446,14 +492,12 @@ private:
         int32_t expertPerRankAligned = (expertPerRank + 8 - 1) / 8 * 8;
         AscendC::LocalTensor<int32_t> tmpBuffer1 = resource.ubBuf.template GetBufferByByte<int32_t>(0);
         AscendC::LocalTensor<int32_t> tmpResult = resource.ubBuf.template GetBufferByByte<int32_t>(EP * expertPerRank * sizeof(int32_t));
-        #define U16(x) static_cast<uint16_t>(x)
-
-        AscendC::DataCopyPad(
-            tmpBuffer1,
-            tokenPerExpert[rankId * expertPerRank],
-            {U16(EP), U16(expertPerRank * sizeof(int32_t)), U16((paddedExpertNumAligned - expertPerRank) * sizeof(int32_t)), 0},
-            {}
-        );
+        LoadExpertCountsPadded(tmpBuffer1,
+                               tokenPerExpert,
+                               rankId * expertPerRank,
+                               static_cast<uint16_t>(EP),
+                               static_cast<uint16_t>(expertPerRank * sizeof(int32_t)),
+                               static_cast<uint16_t>((paddedExpertNumAligned - expertPerRank) * sizeof(int32_t)));
 
         AscendC::SetFlag<AscendC::HardEvent::MTE2_V>(EVENT_ID0);
         AscendC::WaitFlag<AscendC::HardEvent::MTE2_V>(EVENT_ID0);
@@ -466,11 +510,10 @@ private:
         AscendC::SetFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID0);
         AscendC::WaitFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID0);
 
-        AscendC::DataCopyPad(
-            result,
-            tmpBuffer1,
-            {U16(EP), U16((expertPerRank) * sizeof(int32_t)), 0, 0}
-        );
+        StoreExpertCountsPadded(result,
+                                tmpBuffer1,
+                                static_cast<uint16_t>(EP),
+                                static_cast<uint16_t>(expertPerRank * sizeof(int32_t)));
     }
 
     PTO_DEVICE
@@ -693,7 +736,7 @@ private:
 
         AscendC::GlobalTensor<float> flagGlobalBase;
         flagGlobalBase.SetGlobalBuffer(workspaceInfo.ptrSoftFlagBase);
-        AscendC::DataCopy(flagGlobalBase, tmpBuffer1, (params.EP + 1) * FLAGSTRIDE);
+        kernel_detail::PtoStoreVector(flagGlobalBase, tmpBuffer1, (params.EP + 1) * FLAGSTRIDE);
     }
 
 
@@ -750,16 +793,16 @@ private:
         for(int32_t dstEpIdx = coreIdx; dstEpIdx < params.EP; dstEpIdx += coreNum) {
             if (dstEpIdx != params.rank) {
                 remoteWindow.WaitTokenReady(dstEpIdx);
-                AscendC::DataCopy(tmpBuffer, tokenPerExpert[tokenPerExpertLayout(dstEpIdx, 0, 0)], numPerCore);
+                kernel_detail::PtoLoadVector(tmpBuffer, tokenPerExpert[tokenPerExpertLayout(dstEpIdx, 0, 0)], numPerCore);
                 AscendC::SetFlag<AscendC::HardEvent::MTE2_V>(EVENT_ID0);
                 AscendC::WaitFlag<AscendC::HardEvent::MTE2_V>(EVENT_ID0);
                 AscendC::Adds(tmpBuffer, tmpBuffer, -0x800000, numPerCore);
                 AscendC::PipeBarrier<PIPE_V>();
                 AscendC::SetFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID0);
                 AscendC::WaitFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID0);
-                AscendC::DataCopy(tokenPerExpert[tokenPerExpertLayout(dstEpIdx, 0, 0)], tmpBuffer, numPerCore);
+                kernel_detail::PtoStoreVector(tokenPerExpert[tokenPerExpertLayout(dstEpIdx, 0, 0)], tmpBuffer, numPerCore);
             } else {
-                AscendC::DataCopy(tmpBuffer, tokenPerExpert[tokenPerExpertLayout(dstEpIdx, 0, 0)], numPerCore);
+                kernel_detail::PtoLoadVector(tmpBuffer, tokenPerExpert[tokenPerExpertLayout(dstEpIdx, 0, 0)], numPerCore);
                 AscendC::SetFlag<AscendC::HardEvent::MTE2_V>(EVENT_ID0);
                 AscendC::WaitFlag<AscendC::HardEvent::MTE2_V>(EVENT_ID0);
             }
@@ -775,8 +818,8 @@ private:
             }
             AscendC::SetFlag<AscendC::HardEvent::S_MTE3>(EVENT_ID0);
             AscendC::WaitFlag<AscendC::HardEvent::S_MTE3>(EVENT_ID0);
-            AscendC::DataCopyPad(preSumBeforeRank[dstEpIdx * params.expertPerRank], prevSumBuf,
-            AscendC::DataCopyParams{1, static_cast<uint16_t>(params.expertPerRank * sizeof(int32_t)), 0, 0});
+            kernel_detail::PtoStoreVector(preSumBeforeRank[dstEpIdx * params.expertPerRank], prevSumBuf,
+                                          params.expertPerRank);
         }
 
         AscendC::SyncAll<true>();
@@ -794,7 +837,7 @@ private:
         AscendC::Duplicate(tmp, 0, num);
         AscendC::SetFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID0);
         AscendC::WaitFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID0);
-        AscendC::DataCopy(tokenPerExpert, tmp, num);
+        kernel_detail::PtoStoreVector(tokenPerExpert, tmp, num);
     }
 
     PTO_DEVICE
@@ -822,7 +865,7 @@ private:
         AscendC::WaitFlag<AscendC::HardEvent::S_V>(EVENT_ID0);
         while (flag < flagBase) {
             flag = flagBase;
-            AscendC::DataCopy(tmpBuffer1, flagGM, params.EP * FLAGSTRIDE);
+            kernel_detail::PtoLoadVector(tmpBuffer1, flagGM, params.EP * FLAGSTRIDE);
             AscendC::SetFlag<AscendC::HardEvent::MTE2_V>(EVENT_ID0);
             AscendC::WaitFlag<AscendC::HardEvent::MTE2_V>(EVENT_ID0);
 

@@ -24,6 +24,7 @@
 
 #include "kernel_operator.h"
 #include "moe_token_unpermute_tiling.h"
+#include "../moe_init_routing_quant_v2/moe_v2_pto_sort.h"
 using namespace AscendC;
 
 
@@ -42,6 +43,10 @@ protected:
     __aicore__ inline void CalSingleOutToken(const int64_t start_token, const int64_t out_token_idx);
     __aicore__ inline void CalPartOutToken(const int64_t start_token, const int64_t h_index, const int64_t h_length,
                                            const int64_t out_token_index);
+    __aicore__ inline void LoadTokenSlice(const LocalTensor<T1> &tokensLocal, const int64_t offset,
+                                          const int64_t h_length);
+    __aicore__ inline void StoreTokenSlice(const int64_t offset, const LocalTensor<T1> &tokensLocal,
+                                           const int64_t h_length);
     __aicore__ inline void CopyTokenIn(const T2 in_token_index, const int64_t h_index, const int64_t h_length);
     __aicore__ inline void CalFirstToken(const float prob_value, const int64_t h_length);
     __aicore__ inline void CalToken(const float prob_value, const int64_t h_length);
@@ -192,14 +197,14 @@ __aicore__ inline void KernelMoeTokenUnpermute<T1, T2, T3, PROBS>::CalMultiOutTo
 {
     this->indicesLocal = this->indices_inque.template AllocTensor<T2>();
     int64_t in_offset = out_offset * this->top_k;
-    this->copyParams.blockLen = out_tokens_number * this->top_k * sizeof(T2);
-    DataCopyPad(this->indicesLocal, this->indicesGM[in_offset], this->copyParams, this->extParams2);
+    MoeInitRoutingQuantV2::pto_detail::PtoLoadVector(this->indicesLocal, this->indicesGM[in_offset],
+                                                     out_tokens_number * this->top_k);
     this->indices_inque.template EnQue(this->indicesLocal);
 
     if constexpr (PROBS) {
         LocalTensor<T3> temp_probs_tensor = this->probs_inque.template AllocTensor<T3>();
-        this->copyParams.blockLen = out_tokens_number * this->top_k * sizeof(T3);
-        DataCopyPad(temp_probs_tensor, this->probsGM[in_offset], this->copyParams, this->extParams3);
+        MoeInitRoutingQuantV2::pto_detail::PtoLoadVector(temp_probs_tensor, this->probsGM[in_offset],
+                                                         out_tokens_number * this->top_k);
         this->probs_inque.template EnQue(temp_probs_tensor);
         temp_probs_tensor = this->probs_inque.template DeQue<T3>();
         if constexpr (!IsSameType<T3, float>::value) {
@@ -282,20 +287,39 @@ KernelMoeTokenUnpermute<T1, T2, T3, PROBS>::CalPartOutToken(const int64_t start_
 }
 
 template <typename T1, typename T2, typename T3, bool PROBS>
+__aicore__ inline void KernelMoeTokenUnpermute<T1, T2, T3, PROBS>::LoadTokenSlice(const LocalTensor<T1> &tokensLocal,
+                                                                                    const int64_t offset,
+                                                                                    const int64_t h_length)
+{
+    if (likely((h_length * sizeof(T1)) % BLOCK_SIZE == 0)) {
+        MoeInitRoutingQuantV2::pto_detail::PtoLoadVector(tokensLocal, this->tokensGM[offset], h_length);
+    } else {
+        this->copyParams.blockLen = h_length * sizeof(T1);
+        DataCopyPad(tokensLocal, this->tokensGM[offset], this->copyParams, this->extParams1);
+    }
+}
+
+template <typename T1, typename T2, typename T3, bool PROBS>
+__aicore__ inline void KernelMoeTokenUnpermute<T1, T2, T3, PROBS>::StoreTokenSlice(const int64_t offset,
+                                                                                     const LocalTensor<T1> &tokensLocal,
+                                                                                     const int64_t h_length)
+{
+    if (likely((h_length * sizeof(T1)) % BLOCK_SIZE == 0)) {
+        MoeInitRoutingQuantV2::pto_detail::PtoStoreVector(this->outGM[offset], tokensLocal, h_length);
+    } else {
+        this->copyParams.blockLen = h_length * sizeof(T1);
+        DataCopyPad(this->outGM[offset], tokensLocal, this->copyParams);
+    }
+}
+
+template <typename T1, typename T2, typename T3, bool PROBS>
 __aicore__ inline void KernelMoeTokenUnpermute<T1, T2, T3, PROBS>::CopyTokenIn(const T2 in_token_index,
                                                                                const int64_t h_index,
                                                                                const int64_t h_length)
 {
     LocalTensor<T1> tokensLocal = this->tokens_inque.template AllocTensor<T1>();
     int64_t offset = in_token_index * this->hidden_size + h_index * this->hidden_splited_length;
-
-    if (likely((h_length * sizeof(T1)) % BLOCK_SIZE == 0)) {
-        DataCopy(tokensLocal, this->tokensGM[offset], h_length);
-    } else {
-        this->copyParams.blockLen = h_length * sizeof(T1);
-        DataCopyPad(tokensLocal, this->tokensGM[offset], this->copyParams, this->extParams1);
-    }
-
+    LoadTokenSlice(tokensLocal, offset, h_length);
     this->tokens_inque.template EnQue(tokensLocal);
 }
 
@@ -308,8 +332,7 @@ __aicore__ inline void KernelMoeTokenUnpermute<T1, T2, T3, PROBS>::CalFirstToken
     if constexpr (!IsSameType<T1, float>::value) {
         Cast(this->token_tensor0, tokensLocal, RoundMode::CAST_NONE, h_length);
     } else {
-        uint64_t byteAlign32 = (h_length * sizeof(float) + BLOCK_SIZE - 1) & ~(BLOCK_SIZE - 1);
-        DataCopy(this->token_tensor0, tokensLocal, byteAlign32 / sizeof(float));
+        MoeInitRoutingQuantV2::pto_detail::PtoMoveVector(this->token_tensor0, tokensLocal, h_length);
     }
 
     this->tokens_inque.FreeTensor(tokensLocal);
@@ -363,12 +386,7 @@ __aicore__ inline void KernelMoeTokenUnpermute<T1, T2, T3, PROBS>::CopyOut(const
     temp_out_tensors = this->outque.template DeQue<T1>();
 
     int64_t offset = out_token_index * this->hidden_size + h_index * this->hidden_splited_length;
-    if (likely((h_length * sizeof(T1)) % BLOCK_SIZE == 0)) {
-        DataCopy(this->outGM[offset], temp_out_tensors, h_length);
-    } else {
-        this->copyParams.blockLen = h_length * sizeof(T1);
-        DataCopyPad(this->outGM[offset], temp_out_tensors, this->copyParams);
-    }
+    StoreTokenSlice(offset, temp_out_tensors, h_length);
 
     this->outque.FreeTensor(temp_out_tensors);
 }

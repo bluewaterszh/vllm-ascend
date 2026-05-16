@@ -148,6 +148,39 @@ PTO_DEVICE void StoreAccumulator(AscendC::GlobalTensor<ElementC> const &dst,
     }
 }
 
+template <class ArchTag, class TileCopy_, class AType_, class BType_, class CType_>
+struct MatmulShell {
+    using ElementA = typename AType_::Element;
+    using LayoutA = typename AType_::Layout;
+    using ElementB = typename BType_::Element;
+    using LayoutB = typename BType_::Layout;
+    using ElementC = typename CType_::Element;
+
+    using CopyGmToL1A = typename TileCopy_::CopyGmToL1A;
+    using CopyGmToL1B = typename TileCopy_::CopyGmToL1B;
+    using CopyGmToL1S = pto_ext::Gemm::PtoCopyGmToL1<ArchTag, Gemm::GemmType<uint64_t, layout::VectorLayout>>;
+    using CopyL1ToFP = typename pto_ext::Gemm::PtoQuantTileCopy<
+        ArchTag,
+        AType_,
+        BType_,
+        CType_,
+        void,
+        pto_ext::Gemm::Tile::ScaleGranularity::PER_CHANNEL>::CopyL1ToFP;
+    using CopyL1ToL0A = typename TileCopy_::CopyL1ToL0A;
+    using CopyL1ToL0B = typename TileCopy_::CopyL1ToL0B;
+    using ElementAccumulator = typename pto_ext::Gemm::PtoElementAccumulatorSelector<ElementA, ElementB>::ElementAccumulator;
+    using CopyL0CToGm = typename std::conditional<
+        std::is_same_v<ElementA, int8_t>,
+        pto_ext::Gemm::PtoCopyL0CToGm<ArchTag, ElementAccumulator, CType_, Gemm::Tile::ScaleGranularity::PER_CHANNEL>,
+        typename TileCopy_::CopyL0CToGm>::type;
+    using LayoutAInL1 = typename CopyL1ToL0A::LayoutSrc;
+    using LayoutBInL1 = typename CopyL1ToL0B::LayoutSrc;
+    using LayoutAInL0 = typename CopyL1ToL0A::LayoutDst;
+    using LayoutBInL0 = typename CopyL1ToL0B::LayoutDst;
+    using L1AAlignHelper = pto_ext::Gemm::PtoL1AlignHelper<ElementA, LayoutA>;
+    using L1BAlignHelper = pto_ext::Gemm::PtoL1AlignHelper<ElementB, LayoutB>;
+};
+
 }  // namespace detail
 
 
@@ -215,28 +248,23 @@ public:
     using ElementC = typename CType_::Element;
     using LayoutC = typename CType_::Layout;
     using TileMmad = TileMmad_;
-    using CopyGmToL1A = typename TileCopy_::CopyGmToL1A;
-    using CopyGmToL1B = typename TileCopy_::CopyGmToL1B;
-    using CopyGmToL1S = Gemm::Tile::CopyGmToL1<ArchTag, Gemm::GemmType<uint64_t, layout::VectorLayout>>;
-    using CopyL1ToFP = typename Gemm::Tile::QuantTileCopy<ArchTag, AType_, BType_, CType_, void, pto_ext::Gemm::Tile::ScaleGranularity::PER_CHANNEL>::CopyL1ToFP;
-    using CopyL1ToL0A = typename TileCopy_::CopyL1ToL0A;
-    using CopyL1ToL0B = typename TileCopy_::CopyL1ToL0B;
-    
-    using ElementAccumulator =
-        typename Gemm::helper::ElementAccumulatorSelector<ElementA, ElementB>::ElementAccumulator;
-    using CopyL0CToGm = typename std::conditional<
-        std::is_same_v<ElementA, int8_t>,
-        Gemm::Tile::CopyL0CToGm<ArchTag, ElementAccumulator, CType_, Gemm::Tile::ScaleGranularity::PER_CHANNEL>,
-        typename TileCopy_::CopyL0CToGm
-    >::type;
-    using LayoutAInL1 = typename CopyL1ToL0A::LayoutSrc;
-    using LayoutBInL1 = typename CopyL1ToL0B::LayoutSrc;
-    using LayoutAInL0 = typename CopyL1ToL0A::LayoutDst;
-    using LayoutBInL0 = typename CopyL1ToL0B::LayoutDst;
+    using MatmulShell = detail::MatmulShell<ArchTag, TileCopy_, AType_, BType_, CType_>;
+    using CopyGmToL1A = typename MatmulShell::CopyGmToL1A;
+    using CopyGmToL1B = typename MatmulShell::CopyGmToL1B;
+    using CopyGmToL1S = typename MatmulShell::CopyGmToL1S;
+    using CopyL1ToFP = typename MatmulShell::CopyL1ToFP;
+    using CopyL1ToL0A = typename MatmulShell::CopyL1ToL0A;
+    using CopyL1ToL0B = typename MatmulShell::CopyL1ToL0B;
+    using ElementAccumulator = typename MatmulShell::ElementAccumulator;
+    using CopyL0CToGm = typename MatmulShell::CopyL0CToGm;
+    using LayoutAInL1 = typename MatmulShell::LayoutAInL1;
+    using LayoutBInL1 = typename MatmulShell::LayoutBInL1;
+    using LayoutAInL0 = typename MatmulShell::LayoutAInL0;
+    using LayoutBInL0 = typename MatmulShell::LayoutBInL0;
     using LayoutCInL0 = layout::Zn;
 
-    using L1AAlignHelper = Gemm::helper::L1AlignHelper<ElementA, LayoutA>;
-    using L1BAlignHelper = Gemm::helper::L1AlignHelper<ElementB, LayoutB>;
+    using L1AAlignHelper = typename MatmulShell::L1AAlignHelper;
+    using L1BAlignHelper = typename MatmulShell::L1BAlignHelper;
 
     static constexpr uint32_t PRELOAD_STAGES = DispatchPolicy::PRELOAD_STAGES;
     static constexpr uint32_t L1_STAGES = DispatchPolicy::L1_STAGES;

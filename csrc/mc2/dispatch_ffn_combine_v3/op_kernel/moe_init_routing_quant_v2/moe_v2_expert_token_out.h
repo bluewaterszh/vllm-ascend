@@ -37,6 +37,7 @@ class MoeV2ExpertTokenOut {
   __aicore__ inline void SyncAll();
   __aicore__ inline void InitLocal();
   __aicore__ inline void GetExpertTokenCount(int32_t curExpertId);
+  __aicore__ inline void AtomicStoreCountSlice(const GlobalTensor<int32_t>& dstGm, int64_t offset, int64_t copyLength);
   __aicore__ inline void CopyOutTokenGm();
   __aicore__ inline void CopyOutExpertTokensCumsum(bool isTail);
   __aicore__ inline void CopyOutExpertTokensCount(bool isTail);
@@ -97,10 +98,10 @@ __aicore__ inline void MoeV2ExpertTokenOut::InitLocal() {
     if (loop == loops - 1) {
       copyLength = lastLoopRows;
     }
-    DataCopyExtParams copyParams{static_cast<uint16_t>(1), static_cast<uint32_t>(copyLength * sizeof(int32_t)), 0, 0,
-                                 0};
-    DataCopyPad(expandedRowIdxGm[this->blockIdx * this->srcToDstTilingData->perCoreRows + loop * perLoopRows], outLocal,
-                copyParams);
+    pto_detail::PtoStoreVector(
+        expandedRowIdxGm[this->blockIdx * this->srcToDstTilingData->perCoreRows + loop * perLoopRows],
+        outLocal,
+        copyLength);
   }
   SetWaitFlag<HardEvent::MTE3_MTE2>(HardEvent::MTE3_MTE2);
   copyInQueue.FreeTensor(outLocal);
@@ -147,6 +148,15 @@ __aicore__ inline void MoeV2ExpertTokenOut::Compute(int64_t progress) {
   copyInQueue.FreeTensor(inLocal);
 }
 
+__aicore__ inline void MoeV2ExpertTokenOut::AtomicStoreCountSlice(const GlobalTensor<int32_t>& dstGm,
+                                                                 int64_t offset,
+                                                                 int64_t copyLength) {
+  DataCopyExtParams copyParams{static_cast<uint16_t>(1), static_cast<uint32_t>(copyLength * sizeof(int32_t)), 0, 0, 0};
+  SetAtomicAdd<int32_t>();
+  DataCopyPad(dstGm[offset], this->expertTokenIdxOutLocal, copyParams);
+  SetAtomicNone();
+}
+
 __aicore__ inline void MoeV2ExpertTokenOut::CopyOutExpertTokensCumsum(bool isTail) {
   if (this->dropPadMode != DROPLESS_MODE || expertTokensCountOrCumsumFlag != EXERPT_TOKENS_CUMSUM) {
     return;
@@ -170,10 +180,7 @@ __aicore__ inline void MoeV2ExpertTokenOut::CopyOutExpertTokensCumsum(bool isTai
     copyLength = end;
     SetWaitFlag<HardEvent::V_MTE3>(HardEvent::V_MTE3);
   }
-  DataCopyExtParams copyParams{static_cast<uint16_t>(1), static_cast<uint32_t>(copyLength * sizeof(int32_t)), 0, 0, 0};
-  SetAtomicAdd<int32_t>();
-  DataCopyPad(expertTokensCountOrCumsumGm[this->firstExpertId], this->expertTokenIdxOutLocal, copyParams);
-  SetAtomicNone();
+  AtomicStoreCountSlice(expertTokensCountOrCumsumGm, this->firstExpertId, copyLength);
   if (isTail && end > this->expertNumUbAlign) {
     int64_t remainderLength = end - copyLength;
     SetWaitFlag<HardEvent::MTE3_V>(HardEvent::MTE3_V);
@@ -182,26 +189,21 @@ __aicore__ inline void MoeV2ExpertTokenOut::CopyOutExpertTokensCumsum(bool isTai
     int64_t loopTimes = remainderLength / this->expertNumUbAlign + 1;
     for (int64_t i = 0; i < loopTimes; i++) {
       copyLength = i == loopTimes - 1 ? remainderLength - this->expertNumUbAlign * i : this->expertNumUbAlign;
-      DataCopyExtParams params{static_cast<uint16_t>(1), static_cast<uint32_t>(copyLength * sizeof(int32_t)), 0, 0, 0};
-      SetAtomicAdd<int32_t>();
-      DataCopyPad(expertTokensCountOrCumsumGm[this->lastExpertId + 1 + this->expertNumUbAlign * i],
-                  this->expertTokenIdxOutLocal, params);
-      SetAtomicNone();
+      AtomicStoreCountSlice(expertTokensCountOrCumsumGm,
+                            this->lastExpertId + 1 + this->expertNumUbAlign * i,
+                            copyLength);
     }
   }
 }
 
 __aicore__ inline void MoeV2ExpertTokenOut::CopyOutExpertTokensCount(bool isTail) {
   int64_t copyLength = isTail ? this->lastExpertId - this->firstExpertId + 1 : this->expertNumUbAlign;
-  DataCopyExtParams copyParams{static_cast<uint16_t>(1), static_cast<uint32_t>(copyLength * sizeof(int32_t)), 0, 0, 0};
-  SetAtomicAdd<int32_t>();
   if (this->dropPadMode == DROP_PAD_MODE && expertTokensBeforeCapacityFlag > EXERPT_TOKENS_NONE) {
-    DataCopyPad(expertTokensBeforeCapacityGm[this->firstExpertId], this->expertTokenIdxOutLocal, copyParams);
+    AtomicStoreCountSlice(expertTokensBeforeCapacityGm, this->firstExpertId, copyLength);
   }
   if (this->dropPadMode == DROPLESS_MODE && expertTokensCountOrCumsumFlag == EXERPT_TOKENS_COUNT) {
-    DataCopyPad(expertTokensCountOrCumsumGm[this->firstExpertId], this->expertTokenIdxOutLocal, copyParams);
+    AtomicStoreCountSlice(expertTokensCountOrCumsumGm, this->firstExpertId, copyLength);
   }
-  SetAtomicNone();
 }
 
 __aicore__ inline void MoeV2ExpertTokenOut::CopyOutTokenGm() {

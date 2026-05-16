@@ -129,6 +129,13 @@ def get_shortsoc_compile_option(compile_option_list: list, shortsoc:str):
         compile_options.extend(compile_option_list['__ALLSOC__'])
     return compile_options
 
+def append_existing_include(options: list, *paths):
+    for path in paths:
+        real_path = os.path.realpath(path)
+        if os.path.exists(real_path):
+            options.append("-I" + real_path)
+            return
+
 def get_kernel_source(src_file, dir_snake, dir_ex):
     src = os.path.join(PYF_PATH, "op_kernel", src_file)
     if os.path.exists(src):
@@ -174,6 +181,17 @@ def {}({}, kernel_name="{}"{}):
     __inputs__, __outputs__, __attrs__ = _build_args({})
     options = get_dtype_fmt_options(__inputs__, __outputs__)
     options += ["-x", "cce"]
+    append_existing_include(
+        options,
+        os.path.join(PYF_PATH, "..", "..", "..", "..", "..", "..", "..", "pto-isa-zy", "include"),
+        os.path.join(PYF_PATH, "..", "..", "..", "..", "..", "pto-isa-zy", "include"),
+        "/home/ntlab/zy/code/zhangyuan/pto-isa-zy/include",
+    )
+    append_existing_include(
+        options,
+        os.path.join(PYF_PATH, "..", "..", "..", "..", "..", "moe", "hamming_dist_top_k", "op_host"),
+        os.path.join(PYF_PATH, "..", "..", "..", "moe", "hamming_dist_top_k", "op_host"),
+    )
     bisheng = os.environ.get('BISHENG_REAL_PATH')
     if bisheng is None:
         bisheng = shutil.which("bisheng")

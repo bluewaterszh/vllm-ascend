@@ -1452,6 +1452,36 @@ struct TileMmad {};
 
 }  // namespace Tile
 
+template <class ElementA, class ElementB>
+using PtoElementAccumulatorSelector = Gemm::helper::ElementAccumulatorSelector<ElementA, ElementB>;
+
+template <class Element, class Layout>
+using PtoL1AlignHelper = Gemm::helper::L1AlignHelper<Element, Layout>;
+
+template <class ArchTag, class GmType, class L1Type = typename Gemm::helper::L1ATypeSelector<GmType>::L1AType>
+using PtoCopyGmToL1 = Gemm::Tile::CopyGmToL1<ArchTag, GmType, L1Type>;
+
+template <class ArchTag, class L1Type, class L0Type = void>
+using PtoCopyL1ToL0A = Gemm::Tile::CopyL1ToL0A<ArchTag, L1Type, L0Type>;
+
+template <class ArchTag, class L1Type, class L0Type = void>
+using PtoCopyL1ToL0B = Gemm::Tile::CopyL1ToL0B<ArchTag, L1Type, L0Type>;
+
+template <class ArchTag,
+          class AType,
+          class BType,
+          class CType,
+          class BiasType = void,
+          Gemm::Tile::ScaleGranularity SCALE_GRANU = Gemm::Tile::ScaleGranularity::PER_TENSOR>
+using PtoQuantTileCopy = Gemm::Tile::QuantTileCopy<ArchTag, AType, BType, CType, BiasType, SCALE_GRANU>;
+
+template <class ArchTag,
+          class ElementAccumulator,
+          class GmType,
+          Gemm::Tile::ScaleGranularity DEQUANT_GRANULARITY = Gemm::Tile::ScaleGranularity::NO_QUANT,
+          bool ReluEnable = false>
+using PtoCopyL0CToGm = Gemm::Tile::CopyL0CToGm<ArchTag, ElementAccumulator, GmType, DEQUANT_GRANULARITY, ReluEnable>;
+
 namespace Block {
 
 template <uint32_t SwizzleOffset = 1, uint32_t SwizzleDirection = 0>

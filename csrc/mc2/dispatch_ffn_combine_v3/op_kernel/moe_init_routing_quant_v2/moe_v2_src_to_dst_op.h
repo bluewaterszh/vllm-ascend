@@ -16,6 +16,7 @@
 #define INNER_MOE_V2_SRC_TO_DST_H
 
 #include "moe_v2_common.h"
+#include "moe_v2_pto_sort.h"
 
 namespace MoeInitRoutingQuantV2 {
 using namespace AscendC;
@@ -60,14 +61,14 @@ __aicore__ inline void MoeV2SrcToDstOp::AssistInit() {
   OOMCheckAddrRange(assistGm.GetPhyAddr(), ASSIST_NUM * sizeof(int32_t));
 #endif
   LocalTensor<int32_t> assistTensor = assistBuffer.Get<int32_t>(ASSIST_NUM);
-  DataCopy(assistTensor, assistGm, ASSIST_NUM);
+  pto_detail::PtoLoadVector(assistTensor, assistGm, ASSIST_NUM);
   SetWaitFlag<HardEvent::MTE2_V>(HardEvent::MTE2_V);
   Adds(assistTensor, assistTensor, (int32_t)(this->blockIdx * this->srcToDstTilingData->perCoreRows), ASSIST_NUM);
 }
 
 __aicore__ inline void MoeV2SrcToDstOp::CopyIn(int64_t progress) {
   LocalTensor<int32_t> inLocal = copyInQueue.AllocTensor<int32_t>();
-  DataCopy(inLocal, expandDstToSrcRowGm[progress * perLoopRows], Align(currentLoopRows, sizeof(int32_t)));
+  pto_detail::PtoLoadVector(inLocal, expandDstToSrcRowGm[progress * perLoopRows], currentLoopRows);
   copyInQueue.EnQue<int32_t>(inLocal);
 }
 
@@ -89,13 +90,10 @@ __aicore__ inline void MoeV2SrcToDstOp::CopyOut() {
   LocalTensor<int32_t> inLocal = copyInQueue.DeQue<int32_t>();
   LocalTensor<int32_t> outLocal = copyOutQueue.DeQue<int32_t>();
   SetWaitFlag<HardEvent::MTE2_S>(HardEvent::MTE2_S);
-  DataCopyParams intriParams;
-  intriParams.blockCount = 1;
-  intriParams.blockLen = sizeof(int32_t);
   uint32_t outOffset;
   for (int64_t idx = 0; idx < currentLoopRows; idx++) {
     outOffset = inLocal.GetValue(idx);
-    DataCopyPad(expandSrcToDstRowGm[outOffset], outLocal[idx * INT32_ONE_BLOCK_NUM], intriParams);
+    pto_detail::PtoStoreVector(expandSrcToDstRowGm[outOffset], outLocal[idx * INT32_ONE_BLOCK_NUM], 1);
   }
 
   copyInQueue.FreeTensor(inLocal);

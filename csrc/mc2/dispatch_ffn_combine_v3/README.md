@@ -320,9 +320,10 @@ Interpretation:
 
 Current policy for the remaining Stage 3b seams:
 - keep moving the functional PTO migration forward;
-- record every observed regression trend as follow-up optimization input;
-- avoid treating any single exploratory run as a new baseline unless it is measured on the same loop.
-- keep the functionally-correct seam bundles enabled unless they break output contracts or the build.
+- record every observed regression trend in this README as follow-up optimization input;
+- avoid treating any single exploratory run as a new baseline unless it is measured on the same loop;
+- do not rollback a functionally-correct seam bundle only because the large-case kernel time regresses;
+- keep the functionally-correct seam bundles enabled unless they break output contracts or the build, and leave the performance cleanup for a later unified optimization pass.
 
 Stability loop used for the entries below:
 - large case only: `m=2049, k=128, n=128, topk=2, max_output_size=4098`
@@ -668,3 +669,120 @@ Reference functional regression pass after the final cleanup:
 Interpretation:
 - This closes the remaining non-performance tail for the current Stage 3b pass.
 - The remaining movement in the short-loop perf numbers should be treated as checkpoint noise or later optimization input, not as a functional regression.
+
+## PTO residual-surface cleanup checkpoint
+
+Current status:
+- The next low-risk Stage 3b cleanup batch kept shrinking the remaining GM-boundary shells in the routing/unpermute/kernel-helper paths without reopening the already-finished runtime/window contract work.
+- The live copy-helper surface now additionally covers:
+  - `op_kernel/moe_init_routing_quant_v2/moe_v2_src_to_dst_op.h`
+  - `op_kernel/moe_init_routing_quant_v2/moe_v2_sort_one_core.h`
+  - `op_kernel/moe_init_routing_quant_v2/moe_v2_expert_token_out.h`
+  - `op_kernel/unpermute/moe_token_unpermute.h`
+  - `op_kernel/dispatch_ffn_combine_kernel.hpp`
+- The matmul-side shell was also tightened one step further by moving the live template entry points onto PTO-named aliases in `op_kernel/utils/dispatch_policy_custom.hpp`, which are then consumed by `op_kernel/utils/block_mmad_preload_async_fixpipe_quant.hpp`.
+- A fresh rebuild after this batch still keeps both reference cases at `PASS`.
+
+Reference functional regression pass after the residual-surface cleanup checkpoint:
+- small case: kernel `24.61 us`, e2e `98.12 us`, `PASS`
+- large case: kernel `32.93 us`, e2e `120.62 us`, `PASS`
+
+Residual ledger snapshot after this checkpoint:
+- `op_kernel/moe_init_routing_quant_v2/moe_v2_src_to_dst_and_gather.h`: `DataCopyPad=3`, `PipeBarrier=13`, `SetWaitFlag=12`, `Duplicate=6`, `ReduceMax=2`, `SyncAll=1`
+- `op_kernel/dispatch_ffn_combine_kernel.hpp`: `DataCopyPad=4`, `DataCopy=1`, `PipeBarrier=4`, `Duplicate=2`, `SyncAll=12`
+- `op_kernel/moe_init_routing_quant_v2/moe_v2_expert_token_out.h`: `DataCopyPad=4`, `SetWaitFlag=11`, `Duplicate=5`, `SyncAll=5`
+- `op_kernel/moe_init_routing_quant_v2/moe_v2_fullload_quant.h`: `DataCopyPad=2`, `PipeBarrier=12`
+- `op_kernel/unpermute/moe_token_unpermute.h`: `DataCopyPad=2`, `DataCopy=1`, `PipeBarrier=9`, `Duplicate=1`
+- `op_kernel/utils/block_mmad_preload_async_fixpipe_quant.hpp`: `DataCopy=2`, `PipeBarrier=2`, `Gemm::Tile::=2`
+- `op_kernel/utils/dispatch_policy_custom.hpp`: `DataCopy=6`, `Fixpipe=2`, `LoadData=1`, `Gemm::Tile::=11`, `Gemm::helper::=3`
+
+Interpretation:
+- The remaining compute-side work is now visibly concentrated instead of diffuse: the main routing/gather hot seam is `moe_v2_src_to_dst_and_gather.h`, the hottest no-touch seam is still `moe_v2_fullload_quant.h`, and the heaviest substrate shell remains the matmul/fixpipe pair in `dispatch_policy_custom.hpp` and `block_mmad_preload_async_fixpipe_quant.hpp`.
+- The large case moved from the earlier `30.58 us / 125.60 us` matmul-alias checkpoint to `32.93 us / 120.62 us` here; record that drift as follow-up optimization input, but keep the seam bundle enabled because correctness and build stability remain intact.
+- This checkpoint confirms the current function-first policy: continue shrinking safe seams, and defer any systematic tuning of the remaining hot shells to a later dedicated performance pass.
+
+## PTO routing boundary-adapter follow-up
+
+Current status:
+- `op_kernel/moe_init_routing_quant_v2/moe_v2_src_to_dst_and_gather.h` now wraps the remaining input/output tail-padding copies behind two local boundary adapters:
+  - `LoadInputTile(...)`
+  - `StoreExpandedXTile(...)`
+- The aligned GM-boundary path now goes through PTO vector load/store first, while the true tail-padding fallback remains local to the adapter instead of staying open-coded in `Compute()`, `ComputeMax()`, and `ComputeScale()`.
+- A fresh rebuild after this follow-up still keeps both reference cases at `PASS`.
+
+Reference functional regression pass after the boundary-adapter follow-up:
+- small case: kernel `34.44 us`, e2e `114.39 us`, `PASS`
+- large case: kernel `31.64 us`, e2e `120.65 us`, `PASS`
+
+Residual note for the touched file:
+- `op_kernel/moe_init_routing_quant_v2/moe_v2_src_to_dst_and_gather.h`: `DataCopyPad=2`, `PipeBarrier=13`, `SetWaitFlag=12`, `Duplicate=6`, `ReduceMax=2`, `SyncAll=1`
+- Compared with the previous residual-surface checkpoint, the naked `DataCopyPad` sites in this file were reduced from 3 to 2 and are now concentrated in the boundary adapters instead of the main compute bodies.
+
+Interpretation:
+- This is the kind of seam that still fits the current Stage 3b policy: boundary-only shrink, no attempt to rewrite the hot vector math or synchronization cluster in one step.
+- The large-case kernel time improved slightly versus the immediately previous checkpoint (`32.93 us -> 31.64 us`), while the small case regressed (`24.61 us -> 34.44 us`); keep both numbers as trend inputs only, not as a rollback trigger.
+- The next safe follow-up in this file should continue to target boundary/helper concentration rather than the `PipeBarrier` / `SetWaitFlag` / `ReduceMax` hot cluster directly.
+
+## Stage 3b final closure checkpoint
+
+Current status:
+- `task.md` is now closed under the Stage 3b function-first migration standard.
+- Business-kernel direct GM-facing `DataCopy` has been reduced to zero.
+- The last safe seam batch concentrated the remaining system-boundary copies behind local adapters in:
+  - `op_kernel/unpermute/moe_token_unpermute.h`
+  - `op_kernel/moe_init_routing_quant_v2/moe_v2_expert_token_out.h`
+  - `op_kernel/dispatch_ffn_combine_kernel.hpp`
+  - `op_kernel/moe_init_routing_quant_v2/moe_v2_fullload_quant.h`
+- `moe_v2_fullload_quant.h` is intentionally closed by the hot-path-freeze rule: only the input/output tail adapters were kept, and the earlier whole-file PTO rewrite remains out of scope for this function-first stage because it regressed the large case.
+- The remaining non-PTO surfaces are now explicitly classified instead of being open-ended residuals.
+
+Reference commands for the final closure checkpoint:
+
+```bash
+bash csrc/mc2/dispatch_ffn_combine_v3/run.sh \
+  --soc ascend910_93 \
+  --world-size 2 \
+  --m 16 \
+  --k 128 \
+  --n 128 \
+  --topk 2 \
+  --experts 2 \
+  --max-output-size 32
+
+bash csrc/mc2/dispatch_ffn_combine_v3/run.sh \
+  --soc ascend910_93 \
+  --world-size 2 \
+  --m 4097 \
+  --k 128 \
+  --n 128 \
+  --topk 2 \
+  --experts 2 \
+  --max-output-size 8194
+```
+
+Observed results after the final closure checkpoint:
+- small case: kernel `34.88 us`, e2e `147.63 us`, `PASS`
+- large case: kernel `29.03 us`, e2e `118.69 us`, `PASS`
+
+Final residual classification:
+
+### 1. boundary adapter
+- `op_kernel/moe_init_routing_quant_v2/moe_v2_src_to_dst_and_gather.h`: `DataCopyPad=2`, `PipeBarrier=13`, `SetWaitFlag=12`, `Duplicate=6`, `ReduceMax=2`, `SyncAll=1`
+- `op_kernel/moe_init_routing_quant_v2/moe_v2_expert_token_out.h`: `DataCopyPad=1`, `SetWaitFlag=11`, `Duplicate=5`, `SyncAll=5`
+- `op_kernel/moe_init_routing_quant_v2/moe_v2_fullload_quant.h`: `DataCopyPad=2`, `PipeBarrier=12`
+- `op_kernel/unpermute/moe_token_unpermute.h`: `DataCopyPad=2`, `PipeBarrier=9`, `Duplicate=1`
+- `op_kernel/dispatch_ffn_combine_kernel.hpp`: `DataCopyPad=4`, `PipeBarrier=4`, `Duplicate=2`, `SyncAll=12`
+
+### 2. business layer with no direct GM-facing `DataCopy`
+- `op_kernel/moe_init_routing_quant_v2/moe_v2_sort_one_core.h`: `ArithProgression=1`, `SyncAll=1`
+- `op_kernel/moe_init_routing_quant_v2/moe_v2_src_to_dst_op.h`: `PipeBarrier=2`, `SetWaitFlag=2`, `SyncAll=4`
+
+### 3. substrate / host-shell residuals
+- `op_kernel/utils/block_mmad_preload_async_fixpipe_quant.hpp`: `DataCopy=2`, `PipeBarrier=4`, `Gemm::Tile::=2`
+- `op_kernel/utils/dispatch_policy_custom.hpp`: `DataCopy=6`, `Fixpipe=2`, `LoadData=1`, `Gemm::Tile::=11`, `Gemm::helper::=3`
+- `SetWaitFlag` / `SyncAll`: retained where they still express cross-pipe or cross-core host-shell synchronization semantics.
+
+Interpretation:
+- Stage 3b is complete from the migration/task-closure perspective: the remaining non-PTO interfaces are localized, justified, and no longer spread through the business compute bodies without explanation.
+- The next step is no longer function-first seam hunting; it is a dedicated performance pass over the hot vector/sync cluster and the matmul/fixpipe substrate.
+- Keep treating the numbers above as checkpoint records and optimization input, not as a reason to reopen the completed Stage 3b functionality migration.
