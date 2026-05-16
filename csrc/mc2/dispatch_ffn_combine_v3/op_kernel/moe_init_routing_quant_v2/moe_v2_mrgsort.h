@@ -16,6 +16,7 @@
 #define INNER_MOE_V2_MRGSORT_H
 
 #include "moe_v2_common.h"
+#include "moe_v2_pto_sort.h"
 #include "kernel_operator.h"
 
 namespace MoeInitRoutingQuantV2 {
@@ -34,6 +35,7 @@ class MoeV2Mrgsort {
   __aicore__ inline void Process();
   __aicore__ inline void SetInput(GlobalTensor<float>& gmInput, LocalTensor<float>& ubInput);
   __aicore__ inline void SetOutput(GlobalTensor<float>& gmOutput, LocalTensor<float>& ubOutput);
+  __aicore__ inline void SetBuffer(LocalTensor<float>& tempBuffer);
 
  private:
   __aicore__ inline void CopyIn();
@@ -51,6 +53,7 @@ class MoeV2Mrgsort {
 
   LocalTensor<float> ubInputs[4];
   LocalTensor<float> ubOutput;
+  LocalTensor<float> tempBuffer;
 
   int64_t listNum{0};
   int64_t remainListNum{0};
@@ -85,6 +88,10 @@ __aicore__ inline void MoeV2Mrgsort::SetOutput(GlobalTensor<float>& gmOutput, Lo
   this->ubOutput = ubOutput;
 }
 
+__aicore__ inline void MoeV2Mrgsort::SetBuffer(LocalTensor<float>& tempBuffer) {
+  this->tempBuffer = tempBuffer;
+}
+
 __aicore__ inline void MoeV2Mrgsort::UpdateMrgParam() {
   if (this->remainListNum == MERGE_LIST_TWO) {
     elementCountListTail[MERGE_LIST_IDX_TWO] = 0;
@@ -117,17 +124,16 @@ __aicore__ inline void MoeV2Mrgsort::CopyIn() {
 
 __aicore__ inline void MoeV2Mrgsort::MrgsortCompute() {
   SetWaitFlag<HardEvent::MTE2_V>(HardEvent::MTE2_V);
-  if (this->remainListNum == MERGE_LIST_TWO) {
-    MrgSortSrcList sortListTail = MrgSortSrcList(tmpUbInputs[0], tmpUbInputs[1], tmpUbInputs[0], tmpUbInputs[0]);
-    MrgSort<float, true>(this->ubOutput, sortListTail, elementCountListTail, listSortedNums, validBitTail, 1);
-  } else if (this->remainListNum == MERGE_LIST_THREE) {
-    MrgSortSrcList sortListTail =
-        MrgSortSrcList(tmpUbInputs[0], tmpUbInputs[1], tmpUbInputs[MERGE_LIST_IDX_TWO], tmpUbInputs[0]);
-    MrgSort<float, true>(this->ubOutput, sortListTail, elementCountListTail, listSortedNums, validBitTail, 1);
-  } else if (this->remainListNum == MERGE_LIST_FOUR) {
-    MrgSortSrcList sortListTail = MrgSortSrcList(tmpUbInputs[0], tmpUbInputs[1], tmpUbInputs[MERGE_LIST_IDX_TWO],
-                                                 tmpUbInputs[MERGE_LIST_IDX_THREE]);
-    MrgSort<float, true>(this->ubOutput, sortListTail, elementCountListTail, listSortedNums, validBitTail, 1);
+  if (this->remainListNum > 1) {
+    pto_detail::PtoMergePackedSortRecords(this->ubOutput,
+                                          this->tempBuffer,
+                                          this->tmpUbInputs[0],
+                                          this->tmpUbInputs[1],
+                                          this->tmpUbInputs[MERGE_LIST_IDX_TWO],
+                                          this->tmpUbInputs[MERGE_LIST_IDX_THREE],
+                                          this->elementCountListTail,
+                                          this->remainListNum,
+                                          this->listSortedNums);
   } else {
     DataCopy(this->ubOutput, this->tmpUbInputs[0], Align(GetSortLen<float>(elementCountListTail[0]), sizeof(float)));
     listSortedNums[0] = elementCountListTail[0];

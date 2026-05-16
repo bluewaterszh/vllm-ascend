@@ -16,6 +16,7 @@
 #define INNER_MOE_V2_VBS_ONE_CORE_H
 
 #include "moe_v2_sort_base.h"
+#include "moe_v2_pto_sort.h"
 #include "moe_v2_mrgsort.h"
 #include "moe_v2_mrgsort_out.h"
 
@@ -102,31 +103,11 @@ __aicore__ inline void MoeV2SortMultiCore::VBSCopyIn(int64_t progress, int64_t s
 __aicore__ inline void MoeV2SortMultiCore::UBSortCompute(int64_t progress, int64_t size, int64_t sortNum) {
   LocalTensor<int32_t> inLocal = sortDataCopyInQueue.DeQue<int32_t>();
   LocalTensor<int32_t> expertForSourceRowLocal = inLocal[0];
-  LocalTensor<float> expertForSourceRowLocalFp32;
-
-  expertForSourceRowLocalFp32 = expertForSourceRowLocal.ReinterpretCast<float>();
-  Cast(expertForSourceRowLocalFp32, expertForSourceRowLocal, RoundMode::CAST_ROUND, sortNum);
-  AscendC::PipeBarrier<PIPE_V>();
-  Muls(expertForSourceRowLocalFp32, expertForSourceRowLocalFp32, (float)-1, sortNum);
-  AscendC::PipeBarrier<PIPE_V>();
-
-  int64_t duplicateNum = size % ONE_REPEAT_SORT_NUM;
-  if (duplicateNum > 0) {
-    int duplicateIndex = size - duplicateNum;
-    uint64_t mask0 = UINT64_MAX;
-    mask0 = mask0 << duplicateNum;
-    mask0 = mask0 & (UINT64_MAX >> ONE_REPEAT_SORT_NUM);
-    uint64_t mask[2] = {mask0, 0};
-    Duplicate(expertForSourceRowLocalFp32[duplicateIndex], MIN_FP32, mask, 1, DST_BLK_STRIDE, DST_REP_STRIDE);
-    AscendC::PipeBarrier<PIPE_V>();
-  }
-
-  LocalTensor<float> concatLocal = expertForSourceRowLocalFp32;
-  LocalTensor<float> sortedLocal = sortedBuffer.Get<float>(GetSortLen<float>(sortNum));
+  LocalTensor<float> mergeTmpLocal = sortedBuffer.Get<float>(GetSortLen<float>(sortNum));
   LocalTensor<float> outLocal = sortDataCopyOutQueue.AllocTensor<float>();
-  LocalTensor<uint32_t> sourceRowLocal;
-  sourceRowLocal = inLocal[sortNum].ReinterpretCast<uint32_t>();
-  Sort<float, true>(outLocal, concatLocal, sourceRowLocal, sortedLocal, sortNum / ONE_REPEAT_SORT_NUM);
+  LocalTensor<uint32_t> sourceRowLocal = inLocal[sortNum].ReinterpretCast<uint32_t>();
+
+  pto_detail::PtoSortInt32ToPackedUB(expertForSourceRowLocal, sourceRowLocal, outLocal, mergeTmpLocal, size);
 
   sortDataCopyOutQueue.EnQue<float>(outLocal);
   sortDataCopyInQueue.FreeTensor(inLocal);
@@ -151,6 +132,9 @@ __aicore__ inline void MoeV2SortMultiCore::InitMoeMrgSort(MoeV2Mrgsort* sorter, 
   }
   GlobalTensor<float> dstWsGm = workspaceGms[1 - srcWsIndex][blockIdx * coreOffset + loopOffset];
   sorter->SetOutput(dstWsGm, outLocal);
+  LocalTensor<float> tempBuffer =
+      sortedBuffer.Get<float>(GetSortLen<float>(this->sortOutTilingData->oneLoopMaxElements) * MAX_MRGSORT_LIST);
+  sorter->SetBuffer(tempBuffer);
   sortDataCopyInQueue.FreeTensor(inLocal);
   sortDataCopyOutQueue.FreeTensor(outLocal);
 }
@@ -171,7 +155,7 @@ __aicore__ inline void MoeV2SortMultiCore::InitMoeMrgSortOut(MoeV2MrgsortOut* so
 
   LocalTensor<float> tempBuffer =
       sortedBuffer.Get<float>(GetSortLen<float>(this->sortOutTilingData->oneLoopMaxElements) * MAX_MRGSORT_LIST);
-  sorter->SetBuffer(tempBuffer);
+  sorter->SetBuffer(tempBuffer, outLocal);
   sortDataCopyInQueue.FreeTensor(inLocal);
   sortDataCopyOutQueue.FreeTensor(outLocal);
 }

@@ -17,6 +17,8 @@
 
 #include "kernel_operator.h"
 
+#include "moe_v2_pto_sort.h"
+
 namespace MoeInitRoutingQuantV2 {
 using namespace AscendC;
 using namespace optiling;
@@ -92,66 +94,34 @@ __aicore__ inline void MoeV2FullLoadQuantBase::CopyIn() {
 __aicore__ inline void MoeV2FullLoadQuantBase::SortCompute() {
   LocalTensor<int32_t> inLocal = sortDataCopyInQueue.DeQue<int32_t>();
   LocalTensor<int32_t> expertIdxLocal = inLocal[0];
-  LocalTensor<float> expertIdxLocalFp32 = expertIdxLocal.ReinterpretCast<float>();
-  Cast(expertIdxLocalFp32, expertIdxLocal, RoundMode::CAST_ROUND, this->totalLength);
-  AscendC::PipeBarrier<PIPE_V>();
-  Muls(expertIdxLocalFp32, expertIdxLocalFp32, (float)-1, this->totalLength);
-  AscendC::PipeBarrier<PIPE_V>();
-  int64_t duplicateNum = this->totalLength % ONE_REPEAT_SORT_NUM;
-  if (duplicateNum > 0) {
-    int duplicateIndex = this->totalLength - duplicateNum;
-    uint64_t mask0 = UINT64_MAX;
-    mask0 = mask0 << duplicateNum;
-    mask0 = mask0 & (UINT64_MAX >> ONE_REPEAT_SORT_NUM);
-    uint64_t mask[2] = {mask0, 0};
-    Duplicate(expertIdxLocalFp32[duplicateIndex], MIN_FP32, mask, 1, DST_BLK_STRIDE, DST_REP_STRIDE);
-    AscendC::PipeBarrier<PIPE_V>();
-  }
-  LocalTensor<float> concatLocal;
-  LocalTensor<float> tempTensor = tempBuffer.Get<float>(GetSortLen<float>(this->sortNum));
-  Concat(concatLocal, expertIdxLocalFp32, tempTensor, this->sortNum / ONE_REPEAT_SORT_NUM);
-  AscendC::PipeBarrier<PIPE_V>();
   LocalTensor<uint32_t> rowIdxLocal = inLocal[this->sortNum].template ReinterpretCast<uint32_t>();
-  LocalTensor<float> sortedLocal = sortedBuffer.Get<float>(GetSortLen<float>(this->sortNum));
-  Sort<float, true>(sortedLocal, concatLocal, rowIdxLocal, tempTensor, this->sortNum / ONE_REPEAT_SORT_NUM);
-  AscendC::PipeBarrier<PIPE_V>();
-  LocalTensor<float> expandedExpertIdxLocal = expandedExpertIdxCopyOutQueue.AllocTensor<float>();
+  LocalTensor<float> packedSortLocal = tempBuffer.Get<float>(GetSortLen<float>(this->sortNum));
+  LocalTensor<float> mergeTmpLocal = sortedBuffer.Get<float>(GetSortLen<float>(this->sortNum));
+
+  LocalTensor<int32_t> expandedExpertIdxLocal = expandedExpertIdxCopyOutQueue.AllocTensor<int32_t>();
   LocalTensor<uint32_t> expandDstToSrcRowLocal = expandDstToSrcRowQueue.AllocTensor<uint32_t>();
-  LocalTensor<float> expandDstToSrcRowLocalFp32 = expandDstToSrcRowLocal.ReinterpretCast<float>();
-  Extract(expandedExpertIdxLocal, expandDstToSrcRowLocal, sortedLocal, this->sortNum / ONE_REPEAT_SORT_NUM);
-  AscendC::PipeBarrier<PIPE_V>();
-  Cast(expandDstToSrcRowLocalFp32, expandDstToSrcRowLocal.ReinterpretCast<int32_t>(), RoundMode::CAST_ROUND,
-       this->totalLength);
-  AscendC::PipeBarrier<PIPE_V>();
-  Muls(expandedExpertIdxLocal, expandedExpertIdxLocal, (float)-1, this->totalLength);
-  AscendC::PipeBarrier<PIPE_V>();
-  LocalTensor<int32_t> expandedExpertIdxLocalInt32;
-  expandedExpertIdxLocalInt32 = expandedExpertIdxLocal.ReinterpretCast<int32_t>();
-  Cast(expandedExpertIdxLocalInt32, expandedExpertIdxLocal, RoundMode::CAST_ROUND, this->totalLength);
-  AscendC::PipeBarrier<PIPE_V>();
-  expandedExpertIdxCopyOutQueue.EnQue<int32_t>(expandedExpertIdxLocalInt32);
+  pto_detail::PtoSortInt32AscendingUB(expertIdxLocal,
+                                      rowIdxLocal,
+                                      expandedExpertIdxLocal,
+                                      expandDstToSrcRowLocal,
+                                      packedSortLocal,
+                                      mergeTmpLocal,
+                                      this->totalLength);
+  expandedExpertIdxCopyOutQueue.EnQue<int32_t>(expandedExpertIdxLocal);
 
   LocalTensor<uint32_t> expandedRowIdx = expandedRowIdxCopyOutQueue.AllocTensor<uint32_t>();
   LocalTensor<uint32_t> expandedRowIdxU32 = expandedRowIdx.ReinterpretCast<uint32_t>();
-  Muls(expandDstToSrcRowLocalFp32, expandDstToSrcRowLocalFp32, (float)-1, this->totalLength);
-  AscendC::PipeBarrier<PIPE_V>();
+  LocalTensor<int32_t> expandDstToSrcRowLocalInt32 = expandDstToSrcRowLocal.ReinterpretCast<int32_t>();
+  LocalTensor<int32_t> rowSortScratchLocal = expertIdxLocal;
   ArithProgression<int32_t>(inLocal[this->sortNum], 0, 1, this->totalLength);
   AscendC::PipeBarrier<PIPE_V>();
-  if (duplicateNum > 0) {
-    int duplicateIndex = this->totalLength - duplicateNum;
-    uint64_t mask0 = UINT64_MAX;
-    mask0 = mask0 << duplicateNum;
-    mask0 = mask0 & (UINT64_MAX >> ONE_REPEAT_SORT_NUM);
-    uint64_t mask[2] = {mask0, 0};
-    Duplicate(expandDstToSrcRowLocalFp32[duplicateIndex], MIN_FP32, mask, 1, DST_BLK_STRIDE, DST_REP_STRIDE);
-    AscendC::PipeBarrier<PIPE_V>();
-  }
-  Concat(concatLocal, expandDstToSrcRowLocalFp32, tempTensor, this->sortNum / ONE_REPEAT_SORT_NUM);
-  AscendC::PipeBarrier<PIPE_V>();
-  Sort<float, true>(sortedLocal, concatLocal, rowIdxLocal, tempTensor, this->sortNum / ONE_REPEAT_SORT_NUM);
-  AscendC::PipeBarrier<PIPE_V>();
-  Extract(tempTensor, expandedRowIdxU32, sortedLocal, this->sortNum / ONE_REPEAT_SORT_NUM);
-  AscendC::PipeBarrier<PIPE_V>();
+  pto_detail::PtoSortInt32AscendingUB(expandDstToSrcRowLocalInt32,
+                                      rowIdxLocal,
+                                      rowSortScratchLocal,
+                                      expandedRowIdxU32,
+                                      packedSortLocal,
+                                      mergeTmpLocal,
+                                      this->totalLength);
   expandedRowIdxCopyOutQueue.EnQue<uint32_t>(expandedRowIdx);
   sortDataCopyInQueue.FreeTensor(inLocal);
 
