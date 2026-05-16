@@ -5,25 +5,14 @@
 #include "acl/acl.h"
 #include "hccl/hccl_comm.h"
 #include "hccl/hccl_types.h"
-
-struct HcclDeviceContext {
-    static constexpr uint32_t HCCL_MAX_RANK_NUM = 64;
-
-    uint64_t workSpace = 0;
-    uint64_t workSpaceSize = 0;
-    uint32_t rankId = 0;
-    uint32_t rankNum = 0;
-    uint64_t winSize = 0;
-    uint64_t windowsIn[HcclDeviceContext::HCCL_MAX_RANK_NUM] = {};
-    uint64_t windowsOut[HcclDeviceContext::HCCL_MAX_RANK_NUM] = {};
-};
+#include "op_kernel/utils/hccl_context.hpp"
 
 using rtError_t = int32_t;
 using rtStream_t = void *;
 
 extern "C" rtError_t rtStreamCreate(rtStream_t *stream, int32_t priority);
 extern "C" rtError_t rtStreamDestroy(rtStream_t stream);
-extern "C" HcclResult HcclAllocComResourceByTiling(HcclComm comm, void *stream, void *mc2Tiling, void **commContext);
+extern "C" HcclResult HcclAllocComResourceByTiling(HcclComm comm, void *stream, void *resourceTiling, void **commContext);
 extern "C" HcclResult HcomGetCommHandleByGroup(const char *group, HcclComm *commHandle);
 extern "C" HcclResult HcomGetL0TopoTypeEx(const char *group, uint32_t *topoType, uint32_t isSetDevice);
 

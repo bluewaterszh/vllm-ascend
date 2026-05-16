@@ -8,21 +8,21 @@
  * See LICENSE in the root of the software repository for the full text of the License.
  */
 
-#ifndef CATLASS_GEMM_BLOCK_BLOCK_MMAD_PRELOAD_FIXPIPE_QUANT_HPP
-#define CATLASS_GEMM_BLOCK_BLOCK_MMAD_PRELOAD_FIXPIPE_QUANT_HPP
+#ifndef PTO_EXT_GEMM_BLOCK_MMAD_PRELOAD_FIXPIPE_QUANT_HPP
+#define PTO_EXT_GEMM_BLOCK_MMAD_PRELOAD_FIXPIPE_QUANT_HPP
 
 #include "dispatch_policy_custom.hpp"
 #include "pto/common/pto_tile.hpp"
 #include "pto/pto-inst.hpp"
 
-namespace Catlass::Gemm::Block {
+namespace pto_ext::Gemm::Block {
 namespace detail {
 
 using PtoShapeDyn = pto::Shape<pto::DYNAMIC, pto::DYNAMIC, pto::DYNAMIC, pto::DYNAMIC, pto::DYNAMIC>;
 using PtoStrideDyn = pto::Stride<pto::DYNAMIC, pto::DYNAMIC, pto::DYNAMIC, pto::DYNAMIC, pto::DYNAMIC>;
 
 template <typename TileAcc, typename TileLeft, typename TileRight>
-CATLASS_DEVICE void LaunchPtoMatmul(TileAcc &cTile, TileLeft &aTile, TileRight &bTile, bool initC,
+PTO_DEVICE void LaunchPtoMatmul(TileAcc &cTile, TileLeft &aTile, TileRight &bTile, bool initC,
                                            uint8_t unitFlag)
 {
     const bool isFinal = (unitFlag == 0b11);
@@ -48,7 +48,7 @@ CATLASS_DEVICE void LaunchPtoMatmul(TileAcc &cTile, TileLeft &aTile, TileRight &
 }
 
 template <typename ElementAccumulator, typename ElementA, typename ElementB, class L0TileShape>
-CATLASS_DEVICE void PtoTileMmad(AscendC::LocalTensor<ElementAccumulator> const &l0CTensor,
+PTO_DEVICE void PtoTileMmad(AscendC::LocalTensor<ElementAccumulator> const &l0CTensor,
                                        AscendC::LocalTensor<ElementA> const &l0ATensor,
                                        AscendC::LocalTensor<ElementB> const &l0BTensor,
                                        uint32_t m, uint32_t n, uint32_t k,
@@ -77,10 +77,10 @@ CATLASS_DEVICE void PtoTileMmad(AscendC::LocalTensor<ElementAccumulator> const &
 }
 
 template <typename ElementDst, typename ElementAccumulator, int Rows, int Cols, bool ReluEnable = false>
-CATLASS_DEVICE void PtoStoreAccToGm(AscendC::GlobalTensor<ElementDst> const &dst,
+PTO_DEVICE void PtoStoreAccToGm(AscendC::GlobalTensor<ElementDst> const &dst,
                                     AscendC::LocalTensor<ElementAccumulator> const &src,
                                     AscendC::LocalTensor<uint64_t> const &scale,
-                                    layout::RowMajor const &dstLayout)
+                                    layout::ND const &dstLayout)
 {
     using GlobalDataOut = pto::GlobalTensor<ElementDst, PtoShapeDyn, PtoStrideDyn, pto::Layout::ND>;
     using AccTile = pto::TileAccCompact<ElementAccumulator, Rows, Cols, pto::DYNAMIC, pto::DYNAMIC>;
@@ -112,7 +112,7 @@ CATLASS_DEVICE void PtoStoreAccToGm(AscendC::GlobalTensor<ElementDst> const &dst
 }
 
 template <typename CopyGmToL1S, typename CopyL1ToFP>
-CATLASS_DEVICE void StagePerChannelScale(CopyGmToL1S &copyGmToL1S,
+PTO_DEVICE void StagePerChannelScale(CopyGmToL1S &copyGmToL1S,
                                          CopyL1ToFP &copyL1ToFP,
                                          AscendC::LocalTensor<uint64_t> const &l1STensor,
                                          AscendC::LocalTensor<uint64_t> const &fixpipeBuf,
@@ -129,12 +129,12 @@ CATLASS_DEVICE void StagePerChannelScale(CopyGmToL1S &copyGmToL1S,
 }
 
 template <typename ElementA, typename ElementC, typename ElementAccumulator, int Rows, int Cols, typename CopyL0CToGm>
-CATLASS_DEVICE void StoreAccumulator(AscendC::GlobalTensor<ElementC> const &dst,
+PTO_DEVICE void StoreAccumulator(AscendC::GlobalTensor<ElementC> const &dst,
                                      AscendC::LocalTensor<ElementAccumulator> const &src,
                                      AscendC::LocalTensor<uint64_t> const &scale,
                                      CopyL0CToGm &copyL0CToGm,
-                                     layout::RowMajor const &dstLayout,
-                                     layout::zN const &srcLayout,
+                                     layout::ND const &dstLayout,
+                                     layout::Zn const &srcLayout,
                                      uint8_t unitFlag = 0)
 {
     if constexpr (std::is_same_v<ElementA, int8_t>) {
@@ -218,7 +218,7 @@ public:
     using CopyGmToL1A = typename TileCopy_::CopyGmToL1A;
     using CopyGmToL1B = typename TileCopy_::CopyGmToL1B;
     using CopyGmToL1S = Gemm::Tile::CopyGmToL1<ArchTag, Gemm::GemmType<uint64_t, layout::VectorLayout>>;
-    using CopyL1ToFP = typename Gemm::Tile::QuantTileCopy<ArchTag, AType_, BType_, CType_, void, Catlass::Gemm::Tile::ScaleGranularity::PER_CHANNEL>::CopyL1ToFP;
+    using CopyL1ToFP = typename Gemm::Tile::QuantTileCopy<ArchTag, AType_, BType_, CType_, void, pto_ext::Gemm::Tile::ScaleGranularity::PER_CHANNEL>::CopyL1ToFP;
     using CopyL1ToL0A = typename TileCopy_::CopyL1ToL0A;
     using CopyL1ToL0B = typename TileCopy_::CopyL1ToL0B;
     
@@ -233,7 +233,7 @@ public:
     using LayoutBInL1 = typename CopyL1ToL0B::LayoutSrc;
     using LayoutAInL0 = typename CopyL1ToL0A::LayoutDst;
     using LayoutBInL0 = typename CopyL1ToL0B::LayoutDst;
-    using LayoutCInL0 = layout::zN;
+    using LayoutCInL0 = layout::Zn;
 
     using L1AAlignHelper = Gemm::helper::L1AlignHelper<ElementA, LayoutA>;
     using L1BAlignHelper = Gemm::helper::L1AlignHelper<ElementB, LayoutB>;
@@ -257,7 +257,7 @@ public:
     static constexpr uint32_t L0C_TILE_SIZE = L1TileShape::M * L1TileShape::N * sizeof(ElementAccumulator);
 
     // Check LayoutC
-    static_assert(std::is_same_v<LayoutC, layout::RowMajor>, "LayoutC only support RowMajor yet!");
+    static_assert(std::is_same_v<LayoutC, layout::ND>, "LayoutC only supports ND.");
 
     // Check L1TileShape
     static_assert(
@@ -280,7 +280,7 @@ public:
     static constexpr auto L1B_LAYOUT = LayoutBInL1::template MakeLayout<ElementB>(
         L1TileShape::K, L1TileShape::N);
 
-    CATLASS_DEVICE
+    PTO_DEVICE
     BlockMmad(Arch::Resource<ArchTag> &resource, __gm__ int32_t* flagPtr = nullptr, int32_t expertPerRank = 0, 
                 uint32_t l1BufAddrStart = 0, uint32_t FpAddrStart = 0)
     {
@@ -294,7 +294,7 @@ public:
         InitL0C(resource);
     }
 
-    CATLASS_DEVICE
+    PTO_DEVICE
     ~BlockMmad()
     {
         SynchronizeBlock();
@@ -316,7 +316,7 @@ public:
         }
     }
 
-    CATLASS_DEVICE
+    PTO_DEVICE
     void operator()(
         AscendC::GlobalTensor<ElementA> const &gmBlockA, LayoutA const &layoutA,
         AscendC::GlobalTensor<ElementB> const &gmBlockB, LayoutB const &layoutB,
@@ -391,7 +391,7 @@ public:
         }
     }
 
-    CATLASS_DEVICE
+    PTO_DEVICE
     void SynchronizeBlock()
     {
         while (preloadCount > 0) {
@@ -401,7 +401,7 @@ public:
         }
     }
 
-    CATLASS_DEVICE
+    PTO_DEVICE
     void Finalize(int32_t target, int32_t flag = 0)
     {
         if (ptrSoftFlagBase_ != nullptr) {
@@ -435,11 +435,11 @@ private:
         layout::VectorLayout layoutScale;
         int32_t syncLoopIdx;
         int32_t flag;
-        CATLASS_DEVICE
+        PTO_DEVICE
         L1TileMmadParams() = default;
     };
 
-    CATLASS_DEVICE
+    PTO_DEVICE
     void InitL1(Arch::Resource<ArchTag> &resource, uint32_t l1BufAddrStart)
     {
         uint32_t l1AOffset = l1BufAddrStart;
@@ -473,14 +473,14 @@ private:
         }
     }
 
-    CATLASS_DEVICE
+    PTO_DEVICE
     void InitFpBuf(Arch::Resource<ArchTag> &resource, uint32_t FpAddrStart)
     {
         uint32_t FpOffset = FpAddrStart;
         fixpipeBuf = resource.fpBuf.template GetBufferByByte<uint64_t>(FpOffset);
     }
 
-    CATLASS_DEVICE
+    PTO_DEVICE
     void InitL0A(Arch::Resource<ArchTag> &resource)
     {
         for (uint32_t i = 0; i < L0A_STAGES; ++i) {
@@ -490,7 +490,7 @@ private:
         }
     }
 
-    CATLASS_DEVICE
+    PTO_DEVICE
     void InitL0B(Arch::Resource<ArchTag> &resource)
     {
         for (uint32_t i = 0; i < L0B_STAGES; ++i) {
@@ -500,7 +500,7 @@ private:
         }
     }
 
-    CATLASS_DEVICE
+    PTO_DEVICE
     void InitL0C(Arch::Resource<ArchTag> &resource)
     {
         for (uint32_t i = 0; i < L0C_STAGES; ++i) {
@@ -510,7 +510,7 @@ private:
         }
     }
 
-    CATLASS_DEVICE
+    PTO_DEVICE
     void L1TileMmad(L1TileMmadParams const &params)
     {
         uint32_t mPartLoop = CeilDiv<L0TileShape::M>(params.mRound);
@@ -678,6 +678,6 @@ private:
     int32_t expertPerRank_;
 };
 
-}  // namespace Catlass::Gemm::Block
+}  // namespace pto_ext::Gemm::Block
 
-#endif  // CATLASS_GEMM_BLOCK_BLOCK_MMAD_PRELOAD_FIXPIPE_QUANT_HPP
+#endif  // PTO_EXT_GEMM_BLOCK_MMAD_PRELOAD_FIXPIPE_QUANT_HPP

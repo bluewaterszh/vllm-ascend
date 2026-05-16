@@ -7,7 +7,7 @@ using namespace AscendC;
 
 template <typename Layout, typename ElementType, typename = void>
 struct LayoutBInitializer {
-    CATLASS_DEVICE
+    PTO_DEVICE
     static Layout create(uint32_t k, uint32_t n)
     {
         return Layout{k, n};
@@ -16,9 +16,9 @@ struct LayoutBInitializer {
 
 template <typename Layout, typename ElementType>
 struct LayoutBInitializer<Layout, ElementType,
-    std::enable_if_t<std::is_same_v<Layout, Catlass::layout::zN>>>
+    std::enable_if_t<std::is_same_v<Layout, pto_ext::layout::Zn>>>
 {
-    CATLASS_DEVICE
+    PTO_DEVICE
     static Layout create(uint32_t k, uint32_t n)
     {
         return Layout::template MakeLayout<ElementType>(k, n);

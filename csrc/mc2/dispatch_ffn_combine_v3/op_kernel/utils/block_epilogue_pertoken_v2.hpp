@@ -1,5 +1,5 @@
-#ifndef CATLASS_EPILOGUE_BLOCK_EPILOGUE_PER_TOKEN_V2_ONLY_HPP
-#define CATLASS_EPILOGUE_BLOCK_EPILOGUE_PER_TOKEN_V2_ONLY_HPP
+#ifndef PTO_EXT_EPILOGUE_BLOCK_PER_TOKEN_V2_ONLY_HPP
+#define PTO_EXT_EPILOGUE_BLOCK_PER_TOKEN_V2_ONLY_HPP
 
 #include "dispatch_policy_custom.hpp"
 
@@ -9,7 +9,7 @@
 #include "hccl_shmem.hpp"
 #include "layout3d.hpp"
 
-namespace Catlass::Epilogue::Block {
+namespace pto_ext::Epilogue::Block {
 namespace detail {
 
 using PtoShapeDyn = pto::Shape<pto::DYNAMIC, pto::DYNAMIC, pto::DYNAMIC, pto::DYNAMIC, pto::DYNAMIC>;
@@ -19,7 +19,7 @@ template <typename Element>
 using PtoGlobalNd = pto::GlobalTensor<Element, PtoShapeDyn, PtoStrideDyn, pto::Layout::ND>;
 
 template <typename Element>
-CATLASS_DEVICE PtoGlobalNd<Element> MakeContiguousGlobal(AscendC::GlobalTensor<Element> const &tensor, uint32_t elemNum)
+PTO_DEVICE PtoGlobalNd<Element> MakeContiguousGlobal(AscendC::GlobalTensor<Element> const &tensor, uint32_t elemNum)
 {
     PtoShapeDyn shape(1, 1, 1, 1, elemNum);
     PtoStrideDyn stride(elemNum, elemNum, elemNum, elemNum, 1);
@@ -28,7 +28,7 @@ CATLASS_DEVICE PtoGlobalNd<Element> MakeContiguousGlobal(AscendC::GlobalTensor<E
 }
 
 template <typename Element, int TileElems = 128>
-CATLASS_DEVICE void PtoLoadVector(AscendC::LocalTensor<Element> const &dst,
+PTO_DEVICE void PtoLoadVector(AscendC::LocalTensor<Element> const &dst,
                                   AscendC::GlobalTensor<Element> const &src,
                                   uint32_t elemNum)
 {
@@ -45,7 +45,7 @@ CATLASS_DEVICE void PtoLoadVector(AscendC::LocalTensor<Element> const &dst,
 }
 
 template <typename Element, int TileElems = 128>
-CATLASS_DEVICE void PtoStoreVector(AscendC::GlobalTensor<Element> const &dst,
+PTO_DEVICE void PtoStoreVector(AscendC::GlobalTensor<Element> const &dst,
                                    AscendC::LocalTensor<Element> const &src,
                                    uint32_t elemNum)
 {
@@ -62,7 +62,7 @@ CATLASS_DEVICE void PtoStoreVector(AscendC::GlobalTensor<Element> const &dst,
 }
 
 template <typename Element, int TileElems = 128>
-CATLASS_DEVICE void PtoLoadMatrixRows(AscendC::LocalTensor<Element> const &dst,
+PTO_DEVICE void PtoLoadMatrixRows(AscendC::LocalTensor<Element> const &dst,
                                       AscendC::GlobalTensor<Element> const &src,
                                       uint32_t rowNum,
                                       uint32_t colNum,
@@ -75,7 +75,7 @@ CATLASS_DEVICE void PtoLoadMatrixRows(AscendC::LocalTensor<Element> const &dst,
 }
 
 template <typename Element, int TileElems = 128>
-CATLASS_DEVICE void PtoStoreMatrixRows(AscendC::GlobalTensor<Element> const &dst,
+PTO_DEVICE void PtoStoreMatrixRows(AscendC::GlobalTensor<Element> const &dst,
                                        AscendC::LocalTensor<Element> const &src,
                                        uint32_t rowNum,
                                        uint32_t colNum,
@@ -128,9 +128,9 @@ public:
         int32_t offsetD;
         int32_t scratchOffset;
         Layout3D tokenPerExpertLayout;
-        CATLASS_DEVICE
+        PTO_DEVICE
         Params() {};
-        CATLASS_DEVICE
+        PTO_DEVICE
         Params(int32_t EP_, int32_t expertPerRank_, int32_t rank_, __gm__ int32_t *ptrTokenPerExpert_,
         LayoutC layoutC_, int32_t n2_, int32_t n0_, HcclShmem& shmem_, int32_t offsetD_, int32_t scratchOffset_, Layout3D tokenPerExpertLayout_) :
         ptrTokenPerExpert(ptrTokenPerExpert_), EP(EP_),
@@ -140,7 +140,7 @@ public:
     };
 
 
-    CATLASS_DEVICE
+    PTO_DEVICE
     BlockEpilogue(Arch::Resource<ArchTag> const &resource, Params const &params = Params{}) : params(params)
     {
         //ub:192KB
@@ -161,7 +161,7 @@ public:
         tokenPerExpertLayout = params.tokenPerExpertLayout;
         is_ping = true;
     }
-    CATLASS_DEVICE
+    PTO_DEVICE
     void SetFlag()
     {
         AscendC::SetFlag<AscendC::HardEvent::V_MTE2>(EVENT_ID0);
@@ -174,7 +174,7 @@ public:
         AscendC::SetFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID1);
     }
 
-    CATLASS_DEVICE
+    PTO_DEVICE
     void Finalize()
     {
         AscendC::WaitFlag<AscendC::HardEvent::V_MTE2>(EVENT_ID0);
@@ -187,12 +187,12 @@ public:
         AscendC::WaitFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID1);
 
     }
-    CATLASS_DEVICE
+    PTO_DEVICE
     ~BlockEpilogue()
     {
         
     }
-    CATLASS_DEVICE
+    PTO_DEVICE
     void operator() (
         AscendC::GlobalTensor<ElementC> const &gmC,
         AscendC::GlobalTensor<ElementPerTokenScale> const &gmPerTokenScale,

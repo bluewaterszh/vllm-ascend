@@ -8,15 +8,15 @@
  * See LICENSE in the root of the software repository for the full text of the License.
  */
 
-#ifndef CATLASS_EPILOGUE_BLOCK_EPILOGUE_PER_TOKEN_SWIGLU_HPP
-#define CATLASS_EPILOGUE_BLOCK_EPILOGUE_PER_TOKEN_SWIGLU_HPP
+#ifndef PTO_EXT_EPILOGUE_BLOCK_PER_TOKEN_SWIGLU_HPP
+#define PTO_EXT_EPILOGUE_BLOCK_PER_TOKEN_SWIGLU_HPP
 
 #include "dispatch_policy_custom.hpp"
 
 #include <pto/common/pto_tile.hpp>
 #include <pto/pto-inst.hpp>
 
-namespace Catlass::Epilogue::Block {
+namespace pto_ext::Epilogue::Block {
 namespace swiglu_detail {
 
 using PtoShapeDyn = pto::Shape<pto::DYNAMIC, pto::DYNAMIC, pto::DYNAMIC, pto::DYNAMIC, pto::DYNAMIC>;
@@ -26,7 +26,7 @@ template <typename Element>
 using PtoGlobalNd = pto::GlobalTensor<Element, PtoShapeDyn, PtoStrideDyn, pto::Layout::ND>;
 
 template <typename Element>
-CATLASS_DEVICE PtoGlobalNd<Element> MakeContiguousGlobal(AscendC::GlobalTensor<Element> const &tensor, uint32_t elemNum)
+PTO_DEVICE PtoGlobalNd<Element> MakeContiguousGlobal(AscendC::GlobalTensor<Element> const &tensor, uint32_t elemNum)
 {
     PtoShapeDyn shape(1, 1, 1, 1, elemNum);
     PtoStrideDyn stride(elemNum, elemNum, elemNum, elemNum, 1);
@@ -35,7 +35,7 @@ CATLASS_DEVICE PtoGlobalNd<Element> MakeContiguousGlobal(AscendC::GlobalTensor<E
 }
 
 template <typename Element, int TileElems = 1024>
-CATLASS_DEVICE void PtoLoadVector(AscendC::LocalTensor<Element> const &dst,
+PTO_DEVICE void PtoLoadVector(AscendC::LocalTensor<Element> const &dst,
                                   AscendC::GlobalTensor<Element> const &src,
                                   uint32_t elemNum)
 {
@@ -52,7 +52,7 @@ CATLASS_DEVICE void PtoLoadVector(AscendC::LocalTensor<Element> const &dst,
 }
 
 template <typename Element, int TileElems = 1024>
-CATLASS_DEVICE void PtoStoreVector(AscendC::GlobalTensor<Element> const &dst,
+PTO_DEVICE void PtoStoreVector(AscendC::GlobalTensor<Element> const &dst,
                                    AscendC::LocalTensor<Element> const &src,
                                    uint32_t elemNum)
 {
@@ -107,8 +107,8 @@ public:
         "The element type template parameters of BlockEpilogue are wrong"
     );
     static_assert(
-        std::is_same_v<LayoutC, layout::RowMajor> &&
-            std::is_same_v<LayoutPerTokenScale, layout::VectorLayout> && std::is_same_v<LayoutD, layout::RowMajor>,
+        std::is_same_v<LayoutC, layout::ND> &&
+            std::is_same_v<LayoutPerTokenScale, layout::VectorLayout> && std::is_same_v<LayoutD, layout::ND>,
         "The layout template parameters of BlockEpilogue are wrong"
     );
 
@@ -118,17 +118,17 @@ public:
         __gm__ ElementD *ptrD{nullptr};
         LayoutD layoutD{};
 
-        CATLASS_DEVICE
+        PTO_DEVICE
         Params() {};
 
-        CATLASS_DEVICE
+        PTO_DEVICE
         Params(__gm__ ElementPerTokenScale *ptrPerTokenScale_, LayoutPerTokenScale const &layoutPerTokenScale_,
             __gm__ ElementD *ptrD_, LayoutD const &layoutD_
         ) : ptrPerTokenScale(ptrPerTokenScale_), layoutPerTokenScale(layoutPerTokenScale_),
             ptrD(ptrD_), layoutD(layoutD_) {}
     };
 
-    CATLASS_DEVICE
+    PTO_DEVICE
     BlockEpilogue(Arch::Resource<ArchTag> const &resource, int32_t n, Params const &params = Params{}) : params(params)
     {
         size_t ubOffset = 0;
@@ -167,7 +167,7 @@ public:
 
         ubPerTokenScaleOutput = resource.ubBuf.template GetBufferByByte<float>(ubOffset);
     }
-    CATLASS_DEVICE
+    PTO_DEVICE
     void Finalize()
     {
         for (uint32_t i = 0; i < UB_STAGES; ++i) {
@@ -175,19 +175,19 @@ public:
             AscendC::WaitFlag<AscendC::HardEvent::MTE3_V>(eventUbDMTE3VList[i]);
         }
     }
-    CATLASS_DEVICE
+    PTO_DEVICE
     ~BlockEpilogue()
     {
     }
 
-    CATLASS_DEVICE
+    PTO_DEVICE
     void UpdateParams(Params const &params_)
     {
         params = params_;
     }
     // Each tile is 1x7168, and each block covers all tokens for one expert = [group[i], 7168]
-    template <typename CallbackT = DispatchFFNCombineCompat::NoopCallback>
-    CATLASS_DEVICE
+    template <typename CallbackT = pto_ext::support::NoopCallback>
+    PTO_DEVICE
     void operator() (
         AscendC::GlobalTensor<ElementC> const &gmC,
         MatrixCoord const &shapeC,
@@ -348,6 +348,6 @@ private:
 
 };
 
-}  // namespace Catlass::Epilogue::Block
+}  // namespace pto_ext::Epilogue::Block
 
-#endif  // CATLASS_EPILOGUE_BLOCK_EPILOGUE_PER_TOKEN_SWIGLU_HPP
+#endif  // PTO_EXT_EPILOGUE_BLOCK_PER_TOKEN_SWIGLU_HPP

@@ -366,12 +366,12 @@ Reference functional regression pass after the full Stage 3b bundle:
 - small case: kernel `27.90 us`, e2e `121.41 us`, `PASS`
 - large case: kernel `51.60 us`, e2e `149.54 us`, `PASS`
 
-## Catlass cleanup checkpoint
+## legacy compat cleanup checkpoint
 
 Current status:
-- `dispatch_ffn_combine_v3` source and CMake no longer depend on Catlass include paths or `CATLASS_ARCH`.
-- The live int8/zN/A2 path now builds against the local compat surface in `op_kernel/utils/dispatch_policy_custom.hpp`.
-- A fresh rebuild after removing the Catlass tail still keeps both reference cases at `PASS`.
+- `dispatch_ffn_combine_v3` source and CMake no longer depend on the old third-party include paths or legacy arch define.
+- The live int8/Zn/A2 path now builds against the local compat surface in `op_kernel/utils/dispatch_policy_custom.hpp`.
+- A fresh rebuild after removing the legacy compat tail still keeps both reference cases at `PASS`.
 
 Reference commands:
 
@@ -397,7 +397,7 @@ bash csrc/mc2/dispatch_ffn_combine_v3/run.sh \
   --max-output-size 4098
 ```
 
-Observed results after the Catlass cleanup checkpoint:
+Observed results after the legacy compat cleanup checkpoint:
 - small case: kernel `21.79 us`, e2e `94.08 us`, `PASS`
 - large case: kernel `28.89 us`, e2e `125.03 us`, `PASS`
 
@@ -406,6 +406,68 @@ Performance state relative to the earlier full Stage 3b function-first checkpoin
 - large case: kernel `-44.0%`, e2e `-16.4%`
 
 Interpretation:
-- The Catlass deshelling did not break the output contract or standalone build flow.
+- The legacy compat deshelling did not break the output contract or standalone build flow.
 - On this checkpoint, performance is also better than the earlier full Stage 3b function-first reference instead of merely holding steady.
-- The remaining build noise is the PTO macro redefinition warning, not a Catlass dependency.
+- The remaining build noise is the PTO macro redefinition warning, not a legacy compat dependency.
+
+## PTO runtime/context cleanup checkpoint
+
+Current status:
+- `dispatch_ffn_combine_v3` no longer keeps a separate `HCCL_COMM` kernel path.
+- The runtime now reconstructs a shared PTO-style `HcclDeviceContext` on the host side and passes that unified context into the kernel.
+- The device-side shmem path now reads rank/window metadata only from that simplified context instead of parsing the old HCCL-internal resource layout in-kernel.
+- The local legacy compat naming in the live path has also been renamed to PTO-style local naming.
+- A fresh rebuild after this cleanup still keeps both reference cases at `PASS`.
+
+Reference commands:
+
+```bash
+bash csrc/mc2/dispatch_ffn_combine_v3/run.sh \
+  --soc ascend910_93 \
+  --world-size 2 \
+  --m 16 \
+  --k 128 \
+  --n 128 \
+  --topk 2 \
+  --experts 2 \
+  --max-output-size 32
+
+bash csrc/mc2/dispatch_ffn_combine_v3/run.sh \
+  --soc ascend910_93 \
+  --world-size 2 \
+  --m 2049 \
+  --k 128 \
+  --n 128 \
+  --topk 2 \
+  --experts 2 \
+  --max-output-size 4098
+```
+
+Observed results after the runtime/context cleanup checkpoint:
+- small case: kernel `31.25 us`, e2e `120.12 us`, `PASS`
+- large case: kernel `31.02 us`, e2e `107.96 us`, `PASS`
+
+Performance state relative to the earlier legacy compat cleanup checkpoint:
+- small case: kernel `+43.4%`, e2e `+27.7%`
+- large case: kernel `+7.4%`, e2e `-13.7%`
+
+Interpretation:
+- The unified PTO-style context path keeps the standalone ABI and output contract stable while removing the last live split between standalone and `HCCL_COMM` kernel semantics.
+- The large case improves slightly on this checkpoint, while the small case regresses versus the earlier compat-only cleanup; treat that small-case movement as another later optimization input instead of reopening functionality work.
+- The PTO macro redefinition warning was removed by dropping the duplicate build definition from `CMakeLists.txt`.
+
+## PTO naming cleanup checkpoint
+
+Current status:
+- The remaining project-specific legacy identifiers in the live v3 path were renamed to PTO-style naming.
+- The local layout adapter names now follow PTO-native spelling: `ND`, `DN`, `Zn`, `Nz`, `Zz`.
+- The dead v3-local `op_kernel/utils/moe_distribute_base.h` copy was removed.
+- A fresh rebuild after this naming cleanup still keeps both reference cases at `PASS`.
+
+Reference functional regression pass after the naming cleanup:
+- small case: kernel `32.15 us`, e2e `128.73 us`, `PASS`
+- large case: kernel `39.14 us`, e2e `125.41 us`, `PASS`
+
+Interpretation:
+- This checkpoint was a naming-only cleanup pass; it did not change the standalone ABI, tiling contract, or kernel math path.
+- The perf movement on these short runs should be treated as checkpoint noise unless it repeats on the large-case stability loop.

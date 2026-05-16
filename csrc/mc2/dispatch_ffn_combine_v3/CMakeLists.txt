@@ -77,8 +77,6 @@ ascendc_include_directories(dispatch_ffn_combine_v3_kernel PRIVATE
 )
 
 ascendc_compile_definitions(dispatch_ffn_combine_v3_kernel PRIVATE
-    HCCL_COMM
-    PTO_NPU_ARCH_A2A3
     DTYPE_W1=int8_t
     DTYPE_OUT=half
 )

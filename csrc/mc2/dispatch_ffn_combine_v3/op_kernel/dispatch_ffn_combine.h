@@ -20,7 +20,6 @@ using namespace AscendC;
 
 #include "kernel_operator.h"
 
-#include "utils/moe_distribute_base.h"
 
 #include "dispatch_ffn_combine_tiling.h"
 
@@ -267,7 +266,7 @@ template <TemplateMMA2AClass>
 __aicore__ inline void DispatchFFNCombine<TemplateMMA2ACFunc>::Process()
 {
     // Define ArchTag
-    using ArchTag = Catlass::Arch::AtlasA2;
+    using ArchTag = pto_ext::Arch::AtlasA2;
     constexpr bool enableUnitFlag = false;
     constexpr bool enableShuffleK = true;
 
@@ -282,17 +281,17 @@ __aicore__ inline void DispatchFFNCombine<TemplateMMA2ACFunc>::Process()
     bool expertTokensBeforeCapacityFlag = false;
     int64_t quantMode = 1;
 
-    using LayoutA = Catlass::layout::RowMajor;
+    using LayoutA = pto_ext::layout::ND;
     using LayoutB = typename std::conditional<
         Nz_,
-        Catlass::layout::zN,
-        typename std::conditional<TB_, Catlass::layout::ColumnMajor, Catlass::layout::RowMajor>::type
+        pto_ext::layout::Zn,
+        typename std::conditional<TB_, pto_ext::layout::DN, pto_ext::layout::ND>::type
     >::type;
 
     LayoutB layoutB1 = LayoutBInitializer<LayoutB, BType_>::create(k, n);
     LayoutB layoutB2 = LayoutBInitializer<LayoutB, BType_>::create(k2, n2);
-    using LayoutC = Catlass::layout::RowMajor;
-    using L1TileShape = Catlass::GemmShape<128, 256, 512>;   // M, N, K
+    using LayoutC = pto_ext::layout::ND;
+    using L1TileShape = pto_ext::GemmShape<128, 256, 512>;   // M, N, K
 
     constexpr uint32_t workspaceStages = 2;
     constexpr uint32_t preloadStages = 1;
@@ -301,62 +300,62 @@ __aicore__ inline void DispatchFFNCombine<TemplateMMA2ACFunc>::Process()
     constexpr uint32_t l0BStages = 2;
     constexpr uint32_t l0CStages = 1;
 
-    using DispatchPolicy = Catlass::Gemm::MmadAtlasA2PreloadAsyncFixpipe<
+    using DispatchPolicy = pto_ext::Gemm::MmadAtlasA2PreloadAsyncFixpipe<
         preloadStages,
         l1Stages, l0AStages, l0BStages, l0CStages,
         enableUnitFlag, enableShuffleK
     >;
 
-    using L0TileShape = Catlass::GemmShape<128, 256, 128>;
-    using AType = Catlass::Gemm::GemmType<int8_t, Catlass::layout::RowMajor>;
-    using BType = Catlass::Gemm::GemmType<int8_t, LayoutB>;
-    using CType = Catlass::Gemm::GemmType<float16_t, Catlass::layout::RowMajor>;
-    using D1Type = Catlass::Gemm::GemmType<int8_t, Catlass::layout::RowMajor>;
+    using L0TileShape = pto_ext::GemmShape<128, 256, 128>;
+    using AType = pto_ext::Gemm::GemmType<int8_t, pto_ext::layout::ND>;
+    using BType = pto_ext::Gemm::GemmType<int8_t, LayoutB>;
+    using CType = pto_ext::Gemm::GemmType<float16_t, pto_ext::layout::ND>;
+    using D1Type = pto_ext::Gemm::GemmType<int8_t, pto_ext::layout::ND>;
 
     using D2Type = typename std::conditional<
         std::is_same_v<CType_, bfloat16_t>, 
-        Catlass::Gemm::GemmType<bfloat16_t, Catlass::layout::RowMajor>,
-        Catlass::Gemm::GemmType<CType_, Catlass::layout::RowMajor>
+        pto_ext::Gemm::GemmType<bfloat16_t, pto_ext::layout::ND>,
+        pto_ext::Gemm::GemmType<CType_, pto_ext::layout::ND>
         >::type;
 
-    using BlockMmad = Catlass::Gemm::Block::BlockMmad<DispatchPolicy, L1TileShape, L0TileShape, AType, BType, CType>;
+    using BlockMmad = pto_ext::Gemm::Block::BlockMmad<DispatchPolicy, L1TileShape, L0TileShape, AType, BType, CType>;
     constexpr uint32_t ubStages = 2;
 
-    using EpilogueDispatchPolicy1 = Catlass::Epilogue::EpilogueAtlasA2PerTokenDequantSwigluQuant<ubStages>;
+    using EpilogueDispatchPolicy1 = pto_ext::Epilogue::EpilogueAtlasA2PerTokenDequantSwigluQuant<ubStages>;
     
-    using ScaleType = Catlass::Gemm::GemmType<uint64_t, Catlass::layout::VectorLayout>;
-    using PerTokenScaleType = Catlass::Gemm::GemmType<float, Catlass::layout::VectorLayout>;
-    using ElementMulType = Catlass::Gemm::GemmType<float, Catlass::layout::RowMajor>;
-    using TileElemWiseMuls = Catlass::Epilogue::Tile::TileElemWiseMuls<ArchTag, ElementMulType, 0>;
+    using ScaleType = pto_ext::Gemm::GemmType<uint64_t, pto_ext::layout::VectorLayout>;
+    using PerTokenScaleType = pto_ext::Gemm::GemmType<float, pto_ext::layout::VectorLayout>;
+    using ElementMulType = pto_ext::Gemm::GemmType<float, pto_ext::layout::ND>;
+    using TileElemWiseMuls = pto_ext::Epilogue::Tile::TileElemWiseMuls<ArchTag, ElementMulType, 0>;
 
-    using TileCopy1 = Catlass::Epilogue::Tile::TileCopy<ArchTag, CType, ScaleType, PerTokenScaleType, D1Type>;
-    using BlockEpilogue1 = Catlass::Epilogue::Block::BlockEpilogue<EpilogueDispatchPolicy1, CType, PerTokenScaleType,
+    using TileCopy1 = pto_ext::Epilogue::Tile::TileCopy<ArchTag, CType, ScaleType, PerTokenScaleType, D1Type>;
+    using BlockEpilogue1 = pto_ext::Epilogue::Block::BlockEpilogue<EpilogueDispatchPolicy1, CType, PerTokenScaleType,
         D1Type, TileElemWiseMuls, TileCopy1>;
 
-    using EpilogueDispatchPolicy2 = Catlass::Epilogue::EpilogueAtlasA2PerTokenDequant<ubStages>;
-    using EpilogueDispatchPolicy3 =  Catlass::Epilogue::EpilogueAtlasA2PerTokenDequantV2<ubStages>;
+    using EpilogueDispatchPolicy2 = pto_ext::Epilogue::EpilogueAtlasA2PerTokenDequant<ubStages>;
+    using EpilogueDispatchPolicy3 =  pto_ext::Epilogue::EpilogueAtlasA2PerTokenDequantV2<ubStages>;
     
-    using TileCopy2 = Catlass::Epilogue::Tile::TileCopy<ArchTag, CType, ScaleType, PerTokenScaleType, D2Type>;
-    using BlockEpilogue2 = Catlass::Epilogue::Block::BlockEpilogue<EpilogueDispatchPolicy2, CType,PerTokenScaleType,
+    using TileCopy2 = pto_ext::Epilogue::Tile::TileCopy<ArchTag, CType, ScaleType, PerTokenScaleType, D2Type>;
+    using BlockEpilogue2 = pto_ext::Epilogue::Block::BlockEpilogue<EpilogueDispatchPolicy2, CType,PerTokenScaleType,
         D2Type, TileCopy2>;
-    using BlockEpilogue3 = Catlass::Epilogue::Block::BlockEpilogue<EpilogueDispatchPolicy3, CType,PerTokenScaleType,
+    using BlockEpilogue3 = pto_ext::Epilogue::Block::BlockEpilogue<EpilogueDispatchPolicy3, CType,PerTokenScaleType,
         D2Type, TileCopy2>;
 
 
-    using BlockScheduler = typename Catlass::Gemm::Block::GemmIdentityBlockSwizzle<9, 1>;
+    using BlockScheduler = typename pto_ext::Gemm::Block::GemmIdentityBlockSwizzle<9, 1>;
     using ElementGroupList = int64_t;
-    using MatmulKernel = Catlass::Gemm::Kernel::DispatchFFNCombineKernel<BlockMmad,
+    using MatmulKernel = pto_ext::Gemm::Kernel::DispatchFFNCombineKernel<BlockMmad,
         BlockScheduler, ElementGroupList, BlockEpilogue1, BlockEpilogue2, BlockEpilogue3>;
 
     LayoutA layoutA1{static_cast<uint32_t>(m), static_cast<uint32_t>(k)};
     LayoutA layoutA2{static_cast<uint32_t>(m), static_cast<uint32_t>(k2)};
-    Catlass::layout::VectorLayout layoutScale1{static_cast<uint32_t>(n)};
-    Catlass::layout::VectorLayout layoutScale2{static_cast<uint32_t>(n2)};
-    Catlass::layout::RowMajor layoutD1{static_cast<uint32_t>(maxOutputSize), static_cast<uint32_t>(k2)};
-    Catlass::layout::RowMajor layoutD2{static_cast<uint32_t>(m*topK), static_cast<uint32_t>(n2)};
+    pto_ext::layout::VectorLayout layoutScale1{static_cast<uint32_t>(n)};
+    pto_ext::layout::VectorLayout layoutScale2{static_cast<uint32_t>(n2)};
+    pto_ext::layout::ND layoutD1{static_cast<uint32_t>(maxOutputSize), static_cast<uint32_t>(k2)};
+    pto_ext::layout::ND layoutD2{static_cast<uint32_t>(m*topK), static_cast<uint32_t>(n2)};
     // Prepare params
 
-    Catlass::GemmCoord problemShape{static_cast<uint32_t>(m), static_cast<uint32_t>(n), static_cast<uint32_t>(k)};
+    pto_ext::GemmCoord problemShape{static_cast<uint32_t>(m), static_cast<uint32_t>(n), static_cast<uint32_t>(k)};
 
     uint32_t epilogueCoreNum = aivNum;
     uint32_t epilogueGranularity = expertPerRank - 3;

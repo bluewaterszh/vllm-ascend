@@ -8,8 +8,8 @@
  * See LICENSE in the root of the software repository for the full text of the License.
  */
 
-#ifndef CATLASS_EPILOGUE_BLOCK_EPILOGUE_PER_TOKEN_ROW_HPP
-#define CATLASS_EPILOGUE_BLOCK_EPILOGUE_PER_TOKEN_ROW_HPP
+#ifndef PTO_EXT_EPILOGUE_BLOCK_PER_TOKEN_ROW_HPP
+#define PTO_EXT_EPILOGUE_BLOCK_PER_TOKEN_ROW_HPP
 
 #include "dispatch_policy_custom.hpp"
 
@@ -18,7 +18,7 @@
 
 #include "hccl_shmem.hpp"
 
-namespace Catlass::Epilogue::Block {
+namespace pto_ext::Epilogue::Block {
 namespace row_detail {
 
 using PtoShapeDyn = pto::Shape<pto::DYNAMIC, pto::DYNAMIC, pto::DYNAMIC, pto::DYNAMIC, pto::DYNAMIC>;
@@ -28,7 +28,7 @@ template <typename Element>
 using PtoGlobalNd = pto::GlobalTensor<Element, PtoShapeDyn, PtoStrideDyn, pto::Layout::ND>;
 
 template <typename Element>
-CATLASS_DEVICE PtoGlobalNd<Element> MakeContiguousGlobal(AscendC::GlobalTensor<Element> const &tensor, uint32_t elemNum)
+PTO_DEVICE PtoGlobalNd<Element> MakeContiguousGlobal(AscendC::GlobalTensor<Element> const &tensor, uint32_t elemNum)
 {
     PtoShapeDyn shape(1, 1, 1, 1, elemNum);
     PtoStrideDyn stride(elemNum, elemNum, elemNum, elemNum, 1);
@@ -37,7 +37,7 @@ CATLASS_DEVICE PtoGlobalNd<Element> MakeContiguousGlobal(AscendC::GlobalTensor<E
 }
 
 template <typename Element, int TileElems = 1024>
-CATLASS_DEVICE void PtoLoadVector(AscendC::LocalTensor<Element> const &dst,
+PTO_DEVICE void PtoLoadVector(AscendC::LocalTensor<Element> const &dst,
                                   AscendC::GlobalTensor<Element> const &src,
                                   uint32_t elemNum)
 {
@@ -54,7 +54,7 @@ CATLASS_DEVICE void PtoLoadVector(AscendC::LocalTensor<Element> const &dst,
 }
 
 template <typename Element, int TileElems = 1024>
-CATLASS_DEVICE void PtoStoreVector(AscendC::GlobalTensor<Element> const &dst,
+PTO_DEVICE void PtoStoreVector(AscendC::GlobalTensor<Element> const &dst,
                                    AscendC::LocalTensor<Element> const &src,
                                    uint32_t elemNum)
 {
@@ -106,8 +106,8 @@ public:
         "The element type template parameters of BlockEpilogue are wrong"
     );
     static_assert(
-        std::is_same_v<LayoutC, layout::RowMajor> && 
-            std::is_same_v<LayoutPerTokenScale, layout::VectorLayout> && std::is_same_v<LayoutD, layout::RowMajor>,
+        std::is_same_v<LayoutC, layout::ND> && 
+            std::is_same_v<LayoutPerTokenScale, layout::VectorLayout> && std::is_same_v<LayoutD, layout::ND>,
         "The layout template parameters of BlockEpilogue are wrong"
     );
 
@@ -121,15 +121,15 @@ public:
         HcclShmem shmem;
         int32_t scratchOffset;
 
-        CATLASS_DEVICE
+        PTO_DEVICE
         Params() {};
 
-        CATLASS_DEVICE
+        PTO_DEVICE
         Params(int32_t EP_, int32_t expertPerRank_, __gm__ int32_t *ptrTokenPerExpert_, int32_t n2_, int32_t rank_, HcclShmem &shmem_, int32_t scratchOffset_) :
             ptrTokenPerExpert(ptrTokenPerExpert_), EP(EP_), expertPerRank(expertPerRank_), n2(n2_), rank(rank_), shmem(shmem_), scratchOffset(scratchOffset_) {}
     };
 
-    CATLASS_DEVICE
+    PTO_DEVICE
     BlockEpilogue(Arch::Resource<ArchTag> const &resource, Params const &params = Params{}) : params(params)
     {
         size_t ubOffset = 0;
@@ -154,7 +154,7 @@ public:
             ubOffset += blockN * sizeof(float);
         }
     }
-    CATLASS_DEVICE
+    PTO_DEVICE
     void SetFlag() 
     {
         for (uint32_t i = 0; i < UB_STAGES; ++i) {
@@ -163,7 +163,7 @@ public:
         }
     }
     
-    CATLASS_DEVICE
+    PTO_DEVICE
     void Finalize()
     {
         for (uint32_t i = 0; i < UB_STAGES; ++i) {
@@ -171,19 +171,19 @@ public:
             AscendC::WaitFlag<AscendC::HardEvent::MTE3_V>(eventUbDMTE3VList[i]);
         }
     }
-    CATLASS_DEVICE
+    PTO_DEVICE
     ~BlockEpilogue()
     {
         
     }
 
-    CATLASS_DEVICE
+    PTO_DEVICE
     void UpdateParams(Params const &params_)
     {
         params = params_;
     }
 
-    CATLASS_DEVICE
+    PTO_DEVICE
     void operator() (
         AscendC::GlobalTensor<ElementC> const &gmC,
         MatrixCoord const &shapeC,
@@ -277,6 +277,6 @@ private:
 
 };
 
-}  // namespace Catlass::Epilogue::Block
+}  // namespace pto_ext::Epilogue::Block
 
-#endif  // CATLASS_EPILOGUE_BLOCK_EPILOGUE_PER_TOKEN_ROW_HPP
+#endif  // PTO_EXT_EPILOGUE_BLOCK_PER_TOKEN_ROW_HPP

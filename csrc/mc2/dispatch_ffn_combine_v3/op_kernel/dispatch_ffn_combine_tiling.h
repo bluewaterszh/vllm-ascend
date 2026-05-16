@@ -16,7 +16,6 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#include "kernel_tiling.h"
 #include "moe_init_routing_quant_v2/moe_init_routing_v2_tiling.h"
 #include "moe_init_routing_quant_v2/moe_init_routing_quant_v2_tiling.h"
 
@@ -65,8 +64,6 @@ struct DispatchFFNCombineLaunchConfig {
 };
 
 struct DispatchFFNCombineTilingData {
-    Mc2InitTiling mc2InitTiling;
-    Mc2CcTiling mc2CcTiling;
     DispatchFFNCombineInfo dispatchFFNCombineInfo;
     CoCTiling cocTiling;
     DispatchFFNCombineRuntimeInfo runtimeInfo;

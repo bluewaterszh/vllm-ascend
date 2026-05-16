@@ -7,15 +7,15 @@
 #include <cstdint>
 #include <type_traits>
 
-#define CATLASS_DEVICE __forceinline__ __aicore__
+#define PTO_DEVICE __forceinline__ __aicore__
 #ifdef __CCE__
-#define CATLASS_HOST_DEVICE __forceinline__ [host, aicore]
+#define PTO_HOST_DEVICE __forceinline__ [host, aicore]
 #else
-#define CATLASS_HOST_DEVICE
+#define PTO_HOST_DEVICE
 #endif
-#define CATLASS_GLOBAL __global__ __aicore__
+#define PTO_GLOBAL __global__ __aicore__
 
-namespace Catlass {
+namespace pto_ext {
 
 template <class...>
 inline constexpr bool DEPENDENT_FALSE = false;
@@ -34,13 +34,13 @@ constexpr uint32_t BYTE_PER_BLK_FP = 128;
 class EmptyClass {};
 
 template <uint32_t Align, class T>
-CATLASS_HOST_DEVICE constexpr T CeilDiv(T value)
+PTO_HOST_DEVICE constexpr T CeilDiv(T value)
 {
     return (value + static_cast<T>(Align) - 1) / static_cast<T>(Align);
 }
 
 template <class T, class U>
-CATLASS_HOST_DEVICE constexpr auto CeilDiv(T lhs, U rhs)
+PTO_HOST_DEVICE constexpr auto CeilDiv(T lhs, U rhs)
 {
     using Common = std::common_type_t<T, U>;
     Common lhsValue = static_cast<Common>(lhs);
@@ -49,13 +49,13 @@ CATLASS_HOST_DEVICE constexpr auto CeilDiv(T lhs, U rhs)
 }
 
 template <uint32_t Align, class T>
-CATLASS_HOST_DEVICE constexpr T RoundUp(T value)
+PTO_HOST_DEVICE constexpr T RoundUp(T value)
 {
     return CeilDiv<Align>(value) * static_cast<T>(Align);
 }
 
 template <class T, class U>
-CATLASS_HOST_DEVICE constexpr auto AlignUp(T value, U align)
+PTO_HOST_DEVICE constexpr auto AlignUp(T value, U align)
 {
     using Common = std::common_type_t<T, U>;
     Common alignValue = static_cast<Common>(align);
@@ -73,21 +73,21 @@ struct Coord {
 
     Index idx[RANK]{};
 
-    CATLASS_HOST_DEVICE constexpr explicit Coord(Index value = Index(0))
+    PTO_HOST_DEVICE constexpr explicit Coord(Index value = Index(0))
     {
         for (int i = 0; i < RANK; ++i) {
             idx[i] = value;
         }
     }
 
-    CATLASS_HOST_DEVICE constexpr Coord(Index const (&idx_)[RANK])
+    PTO_HOST_DEVICE constexpr Coord(Index const (&idx_)[RANK])
     {
         for (int i = 0; i < RANK; ++i) {
             idx[i] = idx_[i];
         }
     }
 
-    CATLASS_HOST_DEVICE explicit operator bool() const
+    PTO_HOST_DEVICE explicit operator bool() const
     {
         for (int i = 0; i < RANK; ++i) {
             if (idx[i] != 0) {
@@ -97,12 +97,12 @@ struct Coord {
         return false;
     }
 
-    CATLASS_HOST_DEVICE bool operator!() const
+    PTO_HOST_DEVICE bool operator!() const
     {
         return !static_cast<bool>(*this);
     }
 
-    CATLASS_HOST_DEVICE Coord operator+(Coord const &b) const
+    PTO_HOST_DEVICE Coord operator+(Coord const &b) const
     {
         Coord c;
         for (int i = 0; i < RANK; ++i) {
@@ -111,7 +111,7 @@ struct Coord {
         return c;
     }
 
-    CATLASS_HOST_DEVICE Coord operator-(Coord const &b) const
+    PTO_HOST_DEVICE Coord operator-(Coord const &b) const
     {
         Coord c;
         for (int i = 0; i < RANK; ++i) {
@@ -120,7 +120,7 @@ struct Coord {
         return c;
     }
 
-    CATLASS_HOST_DEVICE Coord operator*(Coord const &b) const
+    PTO_HOST_DEVICE Coord operator*(Coord const &b) const
     {
         Coord c;
         for (int i = 0; i < RANK; ++i) {
@@ -129,7 +129,7 @@ struct Coord {
         return c;
     }
 
-    CATLASS_HOST_DEVICE Coord operator/(Coord const &b) const
+    PTO_HOST_DEVICE Coord operator/(Coord const &b) const
     {
         Coord c;
         for (int i = 0; i < RANK; ++i) {
@@ -138,7 +138,7 @@ struct Coord {
         return c;
     }
 
-    CATLASS_HOST_DEVICE Coord &operator+=(Coord const &b)
+    PTO_HOST_DEVICE Coord &operator+=(Coord const &b)
     {
         for (int i = 0; i < RANK; ++i) {
             idx[i] += b[i];
@@ -146,7 +146,7 @@ struct Coord {
         return *this;
     }
 
-    CATLASS_HOST_DEVICE bool operator==(Coord const &b) const
+    PTO_HOST_DEVICE bool operator==(Coord const &b) const
     {
         for (int i = 0; i < RANK; ++i) {
             if (idx[i] != b[i]) {
@@ -156,40 +156,40 @@ struct Coord {
         return true;
     }
 
-    CATLASS_HOST_DEVICE Index &operator[](int dim)
+    PTO_HOST_DEVICE Index &operator[](int dim)
     {
         return idx[dim];
     }
 
-    CATLASS_HOST_DEVICE Index const &operator[](int dim) const
-    {
-        return idx[dim];
-    }
-
-    template <int DIM>
-    CATLASS_HOST_DEVICE Index &At()
-    {
-        return idx[DIM];
-    }
-
-    CATLASS_HOST_DEVICE Index &At(int dim)
+    PTO_HOST_DEVICE Index const &operator[](int dim) const
     {
         return idx[dim];
     }
 
     template <int DIM>
-    CATLASS_HOST_DEVICE Index const &At() const
+    PTO_HOST_DEVICE Index &At()
     {
         return idx[DIM];
     }
 
-    CATLASS_HOST_DEVICE Index const &At(int dim) const
+    PTO_HOST_DEVICE Index &At(int dim)
+    {
+        return idx[dim];
+    }
+
+    template <int DIM>
+    PTO_HOST_DEVICE Index const &At() const
+    {
+        return idx[DIM];
+    }
+
+    PTO_HOST_DEVICE Index const &At(int dim) const
     {
         return idx[dim];
     }
 
     template <int... Is>
-    CATLASS_HOST_DEVICE auto GetCoordByAxis() const
+    PTO_HOST_DEVICE auto GetCoordByAxis() const
     {
         Index values[sizeof...(Is)]{idx[Is]...};
         return Coord<sizeof...(Is), Index, LongIndex>{values};
@@ -197,7 +197,7 @@ struct Coord {
 };
 
 template <class... Ts>
-CATLASS_HOST_DEVICE constexpr auto MakeCoord(Ts... values)
+PTO_HOST_DEVICE constexpr auto MakeCoord(Ts... values)
 {
     using Index = std::common_type_t<Ts...>;
     Index data[sizeof...(Ts)]{static_cast<Index>(values)...};
@@ -205,13 +205,13 @@ CATLASS_HOST_DEVICE constexpr auto MakeCoord(Ts... values)
 }
 
 template <int RANK, class Index, class LongIndex>
-CATLASS_HOST_DEVICE Coord<RANK, Index, LongIndex> CeilDiv(
+PTO_HOST_DEVICE Coord<RANK, Index, LongIndex> CeilDiv(
     Coord<RANK, Index, LongIndex> const &lhs,
     Coord<RANK, Index, LongIndex> const &rhs)
 {
     Coord<RANK, Index, LongIndex> out;
     for (int i = 0; i < RANK; ++i) {
-        out[i] = Catlass::CeilDiv(lhs[i], rhs[i]);
+        out[i] = pto_ext::CeilDiv(lhs[i], rhs[i]);
     }
     return out;
 }
@@ -222,7 +222,7 @@ struct MatrixShape {
     static constexpr uint32_t COLUMN = COLUMN_;
     static constexpr int64_t COUNT = ROW * COLUMN;
 
-    CATLASS_HOST_DEVICE static Coord<2> ToCoord()
+    PTO_HOST_DEVICE static Coord<2> ToCoord()
     {
         return MakeCoord(ROW, COLUMN);
     }
@@ -236,32 +236,32 @@ struct MatrixCoord : public Coord<2, uint32_t> {
     static constexpr uint32_t ROW_INDEX = 0;
     static constexpr uint32_t COLUMN_INDEX = 1;
 
-    CATLASS_HOST_DEVICE MatrixCoord() = default;
-    CATLASS_HOST_DEVICE MatrixCoord(Coord<2, Index> const &coord) : Base(coord) {}
-    CATLASS_HOST_DEVICE MatrixCoord(Index row, Index column) : Base(MakeCoord(row, column)) {}
-    CATLASS_HOST_DEVICE MatrixCoord(LongIndex row, LongIndex column)
+    PTO_HOST_DEVICE MatrixCoord() = default;
+    PTO_HOST_DEVICE MatrixCoord(Coord<2, Index> const &coord) : Base(coord) {}
+    PTO_HOST_DEVICE MatrixCoord(Index row, Index column) : Base(MakeCoord(row, column)) {}
+    PTO_HOST_DEVICE MatrixCoord(LongIndex row, LongIndex column)
         : Base(MakeCoord(Index(row), Index(column))) {}
 
-    CATLASS_HOST_DEVICE Index const &row() const { return this->At(ROW_INDEX); }
-    CATLASS_HOST_DEVICE Index &row() { return this->At(ROW_INDEX); }
-    CATLASS_HOST_DEVICE Index const &column() const { return this->At(COLUMN_INDEX); }
-    CATLASS_HOST_DEVICE Index &column() { return this->At(COLUMN_INDEX); }
+    PTO_HOST_DEVICE Index const &row() const { return this->At(ROW_INDEX); }
+    PTO_HOST_DEVICE Index &row() { return this->At(ROW_INDEX); }
+    PTO_HOST_DEVICE Index const &column() const { return this->At(COLUMN_INDEX); }
+    PTO_HOST_DEVICE Index &column() { return this->At(COLUMN_INDEX); }
 
-    CATLASS_HOST_DEVICE MatrixCoord operator+(Base const &b) const
+    PTO_HOST_DEVICE MatrixCoord operator+(Base const &b) const
     {
         return MatrixCoord(Base::operator+(b));
     }
 
-    CATLASS_HOST_DEVICE MatrixCoord &operator+=(Base const &b)
+    PTO_HOST_DEVICE MatrixCoord &operator+=(Base const &b)
     {
         Base::operator+=(b);
         return *this;
     }
 };
 
-CATLASS_HOST_DEVICE MatrixCoord CeilDiv(MatrixCoord const &lhs, MatrixCoord const &rhs)
+PTO_HOST_DEVICE MatrixCoord CeilDiv(MatrixCoord const &lhs, MatrixCoord const &rhs)
 {
-    return MatrixCoord(Catlass::CeilDiv(lhs.row(), rhs.row()), Catlass::CeilDiv(lhs.column(), rhs.column()));
+    return MatrixCoord(pto_ext::CeilDiv(lhs.row(), rhs.row()), pto_ext::CeilDiv(lhs.column(), rhs.column()));
 }
 
 template <uint32_t M_ = 1, uint32_t N_ = 1, uint32_t K_ = 1>
@@ -275,10 +275,10 @@ struct GemmShape {
     static constexpr int64_t MNK = M * N * K;
     static constexpr int64_t COUNT = MNK;
 
-    CATLASS_HOST_DEVICE static Coord<3> ToCoord() { return MakeCoord(M, N, K); }
-    CATLASS_HOST_DEVICE static Coord<2> ToCoordMN() { return MakeCoord(M, N); }
-    CATLASS_HOST_DEVICE static Coord<2> ToCoordMK() { return MakeCoord(M, K); }
-    CATLASS_HOST_DEVICE static Coord<2> ToCoordKN() { return MakeCoord(K, N); }
+    PTO_HOST_DEVICE static Coord<3> ToCoord() { return MakeCoord(M, N, K); }
+    PTO_HOST_DEVICE static Coord<2> ToCoordMN() { return MakeCoord(M, N); }
+    PTO_HOST_DEVICE static Coord<2> ToCoordMK() { return MakeCoord(M, K); }
+    PTO_HOST_DEVICE static Coord<2> ToCoordKN() { return MakeCoord(K, N); }
 };
 
 struct GemmCoord : public Coord<3, uint32_t> {
@@ -289,33 +289,33 @@ struct GemmCoord : public Coord<3, uint32_t> {
     static constexpr int N_INDEX = 1;
     static constexpr int K_INDEX = 2;
 
-    CATLASS_HOST_DEVICE GemmCoord() = default;
-    CATLASS_HOST_DEVICE GemmCoord(Coord<3, Index> const &coord) : Base(coord) {}
-    CATLASS_HOST_DEVICE GemmCoord(Index m, Index n, Index k) : Base(MakeCoord(m, n, k)) {}
+    PTO_HOST_DEVICE GemmCoord() = default;
+    PTO_HOST_DEVICE GemmCoord(Coord<3, Index> const &coord) : Base(coord) {}
+    PTO_HOST_DEVICE GemmCoord(Index m, Index n, Index k) : Base(MakeCoord(m, n, k)) {}
 
-    CATLASS_HOST_DEVICE Index const &m() const { return this->At(M_INDEX); }
-    CATLASS_HOST_DEVICE Index &m() { return this->At(M_INDEX); }
-    CATLASS_HOST_DEVICE Index const &n() const { return this->At(N_INDEX); }
-    CATLASS_HOST_DEVICE Index &n() { return this->At(N_INDEX); }
-    CATLASS_HOST_DEVICE Index const &k() const { return this->At(K_INDEX); }
-    CATLASS_HOST_DEVICE Index &k() { return this->At(K_INDEX); }
+    PTO_HOST_DEVICE Index const &m() const { return this->At(M_INDEX); }
+    PTO_HOST_DEVICE Index &m() { return this->At(M_INDEX); }
+    PTO_HOST_DEVICE Index const &n() const { return this->At(N_INDEX); }
+    PTO_HOST_DEVICE Index &n() { return this->At(N_INDEX); }
+    PTO_HOST_DEVICE Index const &k() const { return this->At(K_INDEX); }
+    PTO_HOST_DEVICE Index &k() { return this->At(K_INDEX); }
 
-    CATLASS_HOST_DEVICE auto GetCoordMN() const { return this->template GetCoordByAxis<M_INDEX, N_INDEX>(); }
-    CATLASS_HOST_DEVICE auto GetCoordMK() const { return this->template GetCoordByAxis<M_INDEX, K_INDEX>(); }
-    CATLASS_HOST_DEVICE auto GetCoordKN() const { return this->template GetCoordByAxis<K_INDEX, N_INDEX>(); }
+    PTO_HOST_DEVICE auto GetCoordMN() const { return this->template GetCoordByAxis<M_INDEX, N_INDEX>(); }
+    PTO_HOST_DEVICE auto GetCoordMK() const { return this->template GetCoordByAxis<M_INDEX, K_INDEX>(); }
+    PTO_HOST_DEVICE auto GetCoordKN() const { return this->template GetCoordByAxis<K_INDEX, N_INDEX>(); }
 };
 
-CATLASS_HOST_DEVICE GemmCoord CeilDiv(GemmCoord const &lhs, GemmCoord const &rhs)
+PTO_HOST_DEVICE GemmCoord CeilDiv(GemmCoord const &lhs, GemmCoord const &rhs)
 {
     return GemmCoord(
-        Catlass::CeilDiv(lhs.m(), rhs.m()),
-        Catlass::CeilDiv(lhs.n(), rhs.n()),
-        Catlass::CeilDiv(lhs.k(), rhs.k()));
+        pto_ext::CeilDiv(lhs.m(), rhs.m()),
+        pto_ext::CeilDiv(lhs.n(), rhs.n()),
+        pto_ext::CeilDiv(lhs.k(), rhs.k()));
 }
 
 namespace layout {
 
-struct RowMajor {
+struct ND {
     static constexpr int RANK = 2;
     using Index = uint32_t;
     using LongIndex = int64_t;
@@ -325,41 +325,41 @@ struct RowMajor {
     Shape shape_{};
     Stride stride_{};
 
-    CATLASS_HOST_DEVICE RowMajor(Index rows = 0, Index cols = 0)
+    PTO_HOST_DEVICE ND(Index rows = 0, Index cols = 0)
         : shape_(MakeCoord(rows, cols)), stride_(MakeCoord(LongIndex(cols), LongIndex(1))) {}
 
-    CATLASS_HOST_DEVICE RowMajor(Index rows, Index cols, LongIndex ldm)
+    PTO_HOST_DEVICE ND(Index rows, Index cols, LongIndex ldm)
         : shape_(MakeCoord(rows, cols)), stride_(MakeCoord(ldm, LongIndex(1))) {}
 
-    CATLASS_HOST_DEVICE RowMajor(Shape shape, Stride stride) : shape_(shape), stride_(stride) {}
+    PTO_HOST_DEVICE ND(Shape shape, Stride stride) : shape_(shape), stride_(stride) {}
 
     template <class Element>
-    CATLASS_HOST_DEVICE static RowMajor MakeLayout(Index rows, Index cols)
+    PTO_HOST_DEVICE static ND MakeLayout(Index rows, Index cols)
     {
-        return RowMajor(rows, cols);
+        return ND(rows, cols);
     }
 
-    CATLASS_HOST_DEVICE LongIndex GetOffset(MatrixCoord const &coord) const
+    PTO_HOST_DEVICE LongIndex GetOffset(MatrixCoord const &coord) const
     {
         return LongIndex(coord.row()) * stride_[0] + LongIndex(coord.column());
     }
 
-    CATLASS_HOST_DEVICE RowMajor GetTileLayout(MatrixCoord const &tileShape) const
+    PTO_HOST_DEVICE ND GetTileLayout(MatrixCoord const &tileShape) const
     {
-        return RowMajor(tileShape, stride());
+        return ND(tileShape, stride());
     }
 
-    CATLASS_HOST_DEVICE Shape shape() const { return shape_; }
-    CATLASS_HOST_DEVICE Shape &shape() { return shape_; }
-    CATLASS_HOST_DEVICE typename Shape::Index shape(int idx) const { return shape_[idx]; }
-    CATLASS_HOST_DEVICE typename Shape::Index &shape(int idx) { return shape_[idx]; }
-    CATLASS_HOST_DEVICE Stride stride() const { return stride_; }
-    CATLASS_HOST_DEVICE Stride &stride() { return stride_; }
-    CATLASS_HOST_DEVICE typename Stride::Index stride(int idx) const { return stride_[idx]; }
-    CATLASS_HOST_DEVICE typename Stride::Index &stride(int idx) { return stride_[idx]; }
+    PTO_HOST_DEVICE Shape shape() const { return shape_; }
+    PTO_HOST_DEVICE Shape &shape() { return shape_; }
+    PTO_HOST_DEVICE typename Shape::Index shape(int idx) const { return shape_[idx]; }
+    PTO_HOST_DEVICE typename Shape::Index &shape(int idx) { return shape_[idx]; }
+    PTO_HOST_DEVICE Stride stride() const { return stride_; }
+    PTO_HOST_DEVICE Stride &stride() { return stride_; }
+    PTO_HOST_DEVICE typename Stride::Index stride(int idx) const { return stride_[idx]; }
+    PTO_HOST_DEVICE typename Stride::Index &stride(int idx) { return stride_[idx]; }
 };
 
-struct ColumnMajor {
+struct DN {
     static constexpr int RANK = 2;
     using Index = uint32_t;
     using LongIndex = int64_t;
@@ -369,38 +369,38 @@ struct ColumnMajor {
     Shape shape_{};
     Stride stride_{};
 
-    CATLASS_HOST_DEVICE ColumnMajor(Index rows = 0, Index cols = 0)
+    PTO_HOST_DEVICE DN(Index rows = 0, Index cols = 0)
         : shape_(MakeCoord(rows, cols)), stride_(MakeCoord(LongIndex(1), LongIndex(rows))) {}
 
-    CATLASS_HOST_DEVICE ColumnMajor(Index rows, Index cols, LongIndex ldm)
+    PTO_HOST_DEVICE DN(Index rows, Index cols, LongIndex ldm)
         : shape_(MakeCoord(rows, cols)), stride_(MakeCoord(LongIndex(1), ldm)) {}
 
-    CATLASS_HOST_DEVICE ColumnMajor(Shape shape, Stride stride) : shape_(shape), stride_(stride) {}
+    PTO_HOST_DEVICE DN(Shape shape, Stride stride) : shape_(shape), stride_(stride) {}
 
     template <class Element>
-    CATLASS_HOST_DEVICE static ColumnMajor MakeLayout(Index rows, Index cols)
+    PTO_HOST_DEVICE static DN MakeLayout(Index rows, Index cols)
     {
-        return ColumnMajor(rows, cols);
+        return DN(rows, cols);
     }
 
-    CATLASS_HOST_DEVICE LongIndex GetOffset(MatrixCoord const &coord) const
+    PTO_HOST_DEVICE LongIndex GetOffset(MatrixCoord const &coord) const
     {
         return LongIndex(coord.row()) + LongIndex(coord.column()) * stride_[1];
     }
 
-    CATLASS_HOST_DEVICE ColumnMajor GetTileLayout(MatrixCoord const &tileShape) const
+    PTO_HOST_DEVICE DN GetTileLayout(MatrixCoord const &tileShape) const
     {
-        return ColumnMajor(tileShape, stride());
+        return DN(tileShape, stride());
     }
 
-    CATLASS_HOST_DEVICE Shape shape() const { return shape_; }
-    CATLASS_HOST_DEVICE Shape &shape() { return shape_; }
-    CATLASS_HOST_DEVICE typename Shape::Index shape(int idx) const { return shape_[idx]; }
-    CATLASS_HOST_DEVICE typename Shape::Index &shape(int idx) { return shape_[idx]; }
-    CATLASS_HOST_DEVICE Stride stride() const { return stride_; }
-    CATLASS_HOST_DEVICE Stride &stride() { return stride_; }
-    CATLASS_HOST_DEVICE typename Stride::Index stride(int idx) const { return stride_[idx]; }
-    CATLASS_HOST_DEVICE typename Stride::Index &stride(int idx) { return stride_[idx]; }
+    PTO_HOST_DEVICE Shape shape() const { return shape_; }
+    PTO_HOST_DEVICE Shape &shape() { return shape_; }
+    PTO_HOST_DEVICE typename Shape::Index shape(int idx) const { return shape_[idx]; }
+    PTO_HOST_DEVICE typename Shape::Index &shape(int idx) { return shape_[idx]; }
+    PTO_HOST_DEVICE Stride stride() const { return stride_; }
+    PTO_HOST_DEVICE Stride &stride() { return stride_; }
+    PTO_HOST_DEVICE typename Stride::Index stride(int idx) const { return stride_[idx]; }
+    PTO_HOST_DEVICE typename Stride::Index &stride(int idx) { return stride_[idx]; }
 };
 
 struct VectorLayout {
@@ -414,32 +414,32 @@ struct VectorLayout {
     Shape shape_{};
     Stride stride_{};
 
-    CATLASS_HOST_DEVICE VectorLayout(Index size = 0)
+    PTO_HOST_DEVICE VectorLayout(Index size = 0)
         : shape_(MakeCoord(size)), stride_(MakeCoord(LongIndex(1))) {}
 
-    CATLASS_HOST_DEVICE VectorLayout(Shape shape, Stride stride) : shape_(shape), stride_(stride) {}
+    PTO_HOST_DEVICE VectorLayout(Shape shape, Stride stride) : shape_(shape), stride_(stride) {}
 
-    CATLASS_HOST_DEVICE LongIndex GetOffset(TensorCoord const &coord) const
+    PTO_HOST_DEVICE LongIndex GetOffset(TensorCoord const &coord) const
     {
         return stride_[0] * coord[0];
     }
 
-    CATLASS_HOST_DEVICE VectorLayout GetTileLayout(TensorCoord const &tileShape) const
+    PTO_HOST_DEVICE VectorLayout GetTileLayout(TensorCoord const &tileShape) const
     {
         return VectorLayout(tileShape, stride());
     }
 
-    CATLASS_HOST_DEVICE Shape shape() const { return shape_; }
-    CATLASS_HOST_DEVICE Shape &shape() { return shape_; }
-    CATLASS_HOST_DEVICE typename Shape::Index shape(int idx) const { return shape_[idx]; }
-    CATLASS_HOST_DEVICE typename Shape::Index &shape(int idx) { return shape_[idx]; }
-    CATLASS_HOST_DEVICE Stride stride() const { return stride_; }
-    CATLASS_HOST_DEVICE Stride &stride() { return stride_; }
-    CATLASS_HOST_DEVICE typename Stride::Index stride(int idx) const { return stride_[idx]; }
-    CATLASS_HOST_DEVICE typename Stride::Index &stride(int idx) { return stride_[idx]; }
+    PTO_HOST_DEVICE Shape shape() const { return shape_; }
+    PTO_HOST_DEVICE Shape &shape() { return shape_; }
+    PTO_HOST_DEVICE typename Shape::Index shape(int idx) const { return shape_[idx]; }
+    PTO_HOST_DEVICE typename Shape::Index &shape(int idx) { return shape_[idx]; }
+    PTO_HOST_DEVICE Stride stride() const { return stride_; }
+    PTO_HOST_DEVICE Stride &stride() { return stride_; }
+    PTO_HOST_DEVICE typename Stride::Index stride(int idx) const { return stride_[idx]; }
+    PTO_HOST_DEVICE typename Stride::Index &stride(int idx) { return stride_[idx]; }
 };
 
-struct nZ {
+struct Nz {
     static constexpr int RANK = 4;
     using Index = uint32_t;
     using LongIndex = int64_t;
@@ -452,7 +452,7 @@ struct nZ {
     Shape shape_{};
     Stride stride_{};
 
-    CATLASS_HOST_DEVICE constexpr nZ(
+    PTO_HOST_DEVICE constexpr Nz(
         Index orgRows = 0,
         Index orgCols = 0,
         Index rowsInFractal = 0,
@@ -467,16 +467,16 @@ struct nZ {
           shape_(MakeCoord(rowsInFractal, rowsByFractal, colsInFractal, colsByFractal)),
           stride_(MakeCoord(strideRowsInFractal, strideRowsByFractal, strideColsInFractal, strideColsByFractal)) {}
 
-    CATLASS_HOST_DEVICE constexpr nZ(OrgShape orgShape, Shape shape, Stride stride)
+    PTO_HOST_DEVICE constexpr Nz(OrgShape orgShape, Shape shape, Stride stride)
         : orgShape_(orgShape), shape_(shape), stride_(stride) {}
 
     template <class Element>
-    CATLASS_HOST_DEVICE static constexpr nZ MakeLayout(Index orgRows, Index orgCols)
+    PTO_HOST_DEVICE static constexpr Nz MakeLayout(Index orgRows, Index orgCols)
     {
         constexpr uint32_t ELE_NUM_PER_C0 = BYTE_PER_C0 / sizeof(Element);
         Index rowsRound = RoundUp<ELE_NUM_PER_C0>(orgRows);
         Index colsRound = RoundUp<C0_NUM_PER_FRACTAL>(orgCols);
-        return nZ(orgRows,
+        return Nz(orgRows,
                   orgCols,
                   ELE_NUM_PER_C0,
                   rowsRound / ELE_NUM_PER_C0,
@@ -488,23 +488,23 @@ struct nZ {
                   BYTE_PER_FRACTAL / sizeof(Element));
     }
 
-    CATLASS_HOST_DEVICE LongIndex GetOffset(MatrixCoord const &coord) const
+    PTO_HOST_DEVICE LongIndex GetOffset(MatrixCoord const &coord) const
     {
         return LongIndex(coord.row()) / shape_[0] * stride_[1] + LongIndex(coord.column()) / shape_[2] * stride_[3] +
             (LongIndex(coord.row()) % shape_[0]) * stride_[0] + (LongIndex(coord.column()) % shape_[2]) * stride_[2];
     }
 
-    CATLASS_HOST_DEVICE nZ GetTileLayout(MatrixCoord const &tileOriShape) const
+    PTO_HOST_DEVICE Nz GetTileLayout(MatrixCoord const &tileOriShape) const
     {
         auto tileShape = MakeCoord(
             shape(0), CeilDiv(tileOriShape.row(), shape(0)),
             shape(2), CeilDiv(tileOriShape.column(), shape(2)));
-        return nZ(tileOriShape, tileShape, stride());
+        return Nz(tileOriShape, tileShape, stride());
     }
 
-    CATLASS_HOST_DEVICE static nZ MakeLayoutInL0C(MatrixCoord const &shape)
+    PTO_HOST_DEVICE static Nz MakeLayoutInL0C(MatrixCoord const &shape)
     {
-        return nZ(shape.row(),
+        return Nz(shape.row(),
                   shape.column(),
                   C0_NUM_PER_FRACTAL,
                   CeilDiv<C0_NUM_PER_FRACTAL>(shape.row()),
@@ -516,19 +516,19 @@ struct nZ {
                   RoundUp<C0_NUM_PER_FRACTAL>(shape.row()) * C0_NUM_PER_FRACTAL);
     }
 
-    CATLASS_HOST_DEVICE typename OrgShape::Index orgShape(int idx) const { return orgShape_[idx]; }
-    CATLASS_HOST_DEVICE typename OrgShape::Index &orgShape(int idx) { return orgShape_[idx]; }
-    CATLASS_HOST_DEVICE Shape shape() const { return shape_; }
-    CATLASS_HOST_DEVICE Shape &shape() { return shape_; }
-    CATLASS_HOST_DEVICE typename Shape::Index shape(int idx) const { return shape_[idx]; }
-    CATLASS_HOST_DEVICE typename Shape::Index &shape(int idx) { return shape_[idx]; }
-    CATLASS_HOST_DEVICE Stride stride() const { return stride_; }
-    CATLASS_HOST_DEVICE Stride &stride() { return stride_; }
-    CATLASS_HOST_DEVICE typename Stride::Index stride(int idx) const { return stride_[idx]; }
-    CATLASS_HOST_DEVICE typename Stride::Index &stride(int idx) { return stride_[idx]; }
+    PTO_HOST_DEVICE typename OrgShape::Index orgShape(int idx) const { return orgShape_[idx]; }
+    PTO_HOST_DEVICE typename OrgShape::Index &orgShape(int idx) { return orgShape_[idx]; }
+    PTO_HOST_DEVICE Shape shape() const { return shape_; }
+    PTO_HOST_DEVICE Shape &shape() { return shape_; }
+    PTO_HOST_DEVICE typename Shape::Index shape(int idx) const { return shape_[idx]; }
+    PTO_HOST_DEVICE typename Shape::Index &shape(int idx) { return shape_[idx]; }
+    PTO_HOST_DEVICE Stride stride() const { return stride_; }
+    PTO_HOST_DEVICE Stride &stride() { return stride_; }
+    PTO_HOST_DEVICE typename Stride::Index stride(int idx) const { return stride_[idx]; }
+    PTO_HOST_DEVICE typename Stride::Index &stride(int idx) { return stride_[idx]; }
 };
 
-struct zN {
+struct Zn {
     static constexpr int RANK = 4;
     using Index = uint32_t;
     using LongIndex = int64_t;
@@ -541,7 +541,7 @@ struct zN {
     Shape shape_{};
     Stride stride_{};
 
-    CATLASS_HOST_DEVICE constexpr zN(
+    PTO_HOST_DEVICE constexpr Zn(
         Index orgRows = 0,
         Index orgCols = 0,
         Index rowsInFractal = 0,
@@ -556,16 +556,16 @@ struct zN {
           shape_(MakeCoord(rowsInFractal, rowsByFractal, colsInFractal, colsByFractal)),
           stride_(MakeCoord(strideRowsInFractal, strideRowsByFractal, strideColsInFractal, strideColsByFractal)) {}
 
-    CATLASS_HOST_DEVICE constexpr zN(OrgShape orgShape, Shape shape, Stride stride)
+    PTO_HOST_DEVICE constexpr Zn(OrgShape orgShape, Shape shape, Stride stride)
         : orgShape_(orgShape), shape_(shape), stride_(stride) {}
 
     template <class Element>
-    CATLASS_HOST_DEVICE static constexpr zN MakeLayout(Index orgRows, Index orgCols)
+    PTO_HOST_DEVICE static constexpr Zn MakeLayout(Index orgRows, Index orgCols)
     {
         constexpr uint32_t ELE_NUM_PER_C0 = BYTE_PER_C0 / sizeof(Element);
         Index rowsRound = RoundUp<C0_NUM_PER_FRACTAL>(orgRows);
         Index colsRound = RoundUp<ELE_NUM_PER_C0>(orgCols);
-        return zN(orgRows,
+        return Zn(orgRows,
                   orgCols,
                   C0_NUM_PER_FRACTAL,
                   rowsRound / C0_NUM_PER_FRACTAL,
@@ -577,9 +577,9 @@ struct zN {
                   rowsRound * ELE_NUM_PER_C0);
     }
 
-    CATLASS_HOST_DEVICE static zN MakeLayoutInL0C(MatrixCoord const &shape)
+    PTO_HOST_DEVICE static Zn MakeLayoutInL0C(MatrixCoord const &shape)
     {
-        return zN(shape.row(),
+        return Zn(shape.row(),
                   shape.column(),
                   C0_NUM_PER_FRACTAL,
                   CeilDiv<C0_NUM_PER_FRACTAL>(shape.row()),
@@ -591,33 +591,33 @@ struct zN {
                   RoundUp<C0_NUM_PER_FRACTAL>(shape.row()) * C0_NUM_PER_FRACTAL);
     }
 
-    CATLASS_HOST_DEVICE LongIndex GetOffset(MatrixCoord const &coord) const
+    PTO_HOST_DEVICE LongIndex GetOffset(MatrixCoord const &coord) const
     {
         return LongIndex(coord.row()) / shape_[0] * stride_[1] + LongIndex(coord.column()) / shape_[2] * stride_[3] +
             (LongIndex(coord.row()) % shape_[0]) * stride_[0] + (LongIndex(coord.column()) % shape_[2]) * stride_[2];
     }
 
-    CATLASS_HOST_DEVICE zN GetTileLayout(MatrixCoord const &tileOriShape) const
+    PTO_HOST_DEVICE Zn GetTileLayout(MatrixCoord const &tileOriShape) const
     {
         auto tileShape = MakeCoord(
             shape(0), CeilDiv(tileOriShape.row(), shape(0)),
             shape(2), CeilDiv(tileOriShape.column(), shape(2)));
-        return zN(tileOriShape, tileShape, stride());
+        return Zn(tileOriShape, tileShape, stride());
     }
 
-    CATLASS_HOST_DEVICE typename OrgShape::Index orgShape(int idx) const { return orgShape_[idx]; }
-    CATLASS_HOST_DEVICE typename OrgShape::Index &orgShape(int idx) { return orgShape_[idx]; }
-    CATLASS_HOST_DEVICE Shape shape() const { return shape_; }
-    CATLASS_HOST_DEVICE Shape &shape() { return shape_; }
-    CATLASS_HOST_DEVICE typename Shape::Index shape(int idx) const { return shape_[idx]; }
-    CATLASS_HOST_DEVICE typename Shape::Index &shape(int idx) { return shape_[idx]; }
-    CATLASS_HOST_DEVICE Stride stride() const { return stride_; }
-    CATLASS_HOST_DEVICE Stride &stride() { return stride_; }
-    CATLASS_HOST_DEVICE typename Stride::Index stride(int idx) const { return stride_[idx]; }
-    CATLASS_HOST_DEVICE typename Stride::Index &stride(int idx) { return stride_[idx]; }
+    PTO_HOST_DEVICE typename OrgShape::Index orgShape(int idx) const { return orgShape_[idx]; }
+    PTO_HOST_DEVICE typename OrgShape::Index &orgShape(int idx) { return orgShape_[idx]; }
+    PTO_HOST_DEVICE Shape shape() const { return shape_; }
+    PTO_HOST_DEVICE Shape &shape() { return shape_; }
+    PTO_HOST_DEVICE typename Shape::Index shape(int idx) const { return shape_[idx]; }
+    PTO_HOST_DEVICE typename Shape::Index &shape(int idx) { return shape_[idx]; }
+    PTO_HOST_DEVICE Stride stride() const { return stride_; }
+    PTO_HOST_DEVICE Stride &stride() { return stride_; }
+    PTO_HOST_DEVICE typename Stride::Index stride(int idx) const { return stride_[idx]; }
+    PTO_HOST_DEVICE typename Stride::Index &stride(int idx) { return stride_[idx]; }
 };
 
-struct zZ {
+struct Zz {
     static constexpr int RANK = 4;
     using Index = uint32_t;
     using LongIndex = int64_t;
@@ -630,7 +630,7 @@ struct zZ {
     Shape shape_{};
     Stride stride_{};
 
-    CATLASS_HOST_DEVICE constexpr zZ(
+    PTO_HOST_DEVICE constexpr Zz(
         Index orgRows = 0,
         Index orgCols = 0,
         Index rowsInFractal = 0,
@@ -645,16 +645,16 @@ struct zZ {
           shape_(MakeCoord(rowsInFractal, rowsByFractal, colsInFractal, colsByFractal)),
           stride_(MakeCoord(strideRowsInFractal, strideRowsByFractal, strideColsInFractal, strideColsByFractal)) {}
 
-    CATLASS_HOST_DEVICE constexpr zZ(OrgShape orgShape, Shape shape, Stride stride)
+    PTO_HOST_DEVICE constexpr Zz(OrgShape orgShape, Shape shape, Stride stride)
         : orgShape_(orgShape), shape_(shape), stride_(stride) {}
 
     template <class Element>
-    CATLASS_HOST_DEVICE static constexpr zZ MakeLayout(Index orgRows, Index orgCols)
+    PTO_HOST_DEVICE static constexpr Zz MakeLayout(Index orgRows, Index orgCols)
     {
         constexpr uint32_t ELE_NUM_PER_C0 = BYTE_PER_C0 / sizeof(Element);
         Index rowsRound = RoundUp<C0_NUM_PER_FRACTAL>(orgRows);
         Index colsRound = RoundUp<ELE_NUM_PER_C0>(orgCols);
-        return zZ(orgRows,
+        return Zz(orgRows,
                   orgCols,
                   C0_NUM_PER_FRACTAL,
                   rowsRound / C0_NUM_PER_FRACTAL,
@@ -666,21 +666,21 @@ struct zZ {
                   BYTE_PER_FRACTAL / sizeof(Element));
     }
 
-    CATLASS_HOST_DEVICE LongIndex GetOffset(MatrixCoord const &coord) const
+    PTO_HOST_DEVICE LongIndex GetOffset(MatrixCoord const &coord) const
     {
         return LongIndex(coord.row()) / shape_[0] * stride_[1] + LongIndex(coord.column()) / shape_[2] * stride_[3];
     }
 
-    CATLASS_HOST_DEVICE typename OrgShape::Index orgShape(int idx) const { return orgShape_[idx]; }
-    CATLASS_HOST_DEVICE typename OrgShape::Index &orgShape(int idx) { return orgShape_[idx]; }
-    CATLASS_HOST_DEVICE Shape shape() const { return shape_; }
-    CATLASS_HOST_DEVICE Shape &shape() { return shape_; }
-    CATLASS_HOST_DEVICE typename Shape::Index shape(int idx) const { return shape_[idx]; }
-    CATLASS_HOST_DEVICE typename Shape::Index &shape(int idx) { return shape_[idx]; }
-    CATLASS_HOST_DEVICE Stride stride() const { return stride_; }
-    CATLASS_HOST_DEVICE Stride &stride() { return stride_; }
-    CATLASS_HOST_DEVICE typename Stride::Index stride(int idx) const { return stride_[idx]; }
-    CATLASS_HOST_DEVICE typename Stride::Index &stride(int idx) { return stride_[idx]; }
+    PTO_HOST_DEVICE typename OrgShape::Index orgShape(int idx) const { return orgShape_[idx]; }
+    PTO_HOST_DEVICE typename OrgShape::Index &orgShape(int idx) { return orgShape_[idx]; }
+    PTO_HOST_DEVICE Shape shape() const { return shape_; }
+    PTO_HOST_DEVICE Shape &shape() { return shape_; }
+    PTO_HOST_DEVICE typename Shape::Index shape(int idx) const { return shape_[idx]; }
+    PTO_HOST_DEVICE typename Shape::Index &shape(int idx) { return shape_[idx]; }
+    PTO_HOST_DEVICE Stride stride() const { return stride_; }
+    PTO_HOST_DEVICE Stride &stride() { return stride_; }
+    PTO_HOST_DEVICE typename Stride::Index stride(int idx) const { return stride_[idx]; }
+    PTO_HOST_DEVICE typename Stride::Index &stride(int idx) { return stride_[idx]; }
 };
 
 }  // namespace layout
@@ -699,13 +699,13 @@ struct AtlasA2 {
 
 struct LocalTensorBufferBase {
     template <class Element = half>
-    CATLASS_DEVICE AscendC::LocalTensor<Element> GetBufferByByte(const uint32_t offset) const
+    PTO_DEVICE AscendC::LocalTensor<Element> GetBufferByByte(const uint32_t offset) const
     {
         return tensor[offset].template ReinterpretCast<Element>();
     }
 
 protected:
-    CATLASS_DEVICE LocalTensorBufferBase() = default;
+    PTO_DEVICE LocalTensorBufferBase() = default;
     AscendC::LocalTensor<uint8_t> tensor;
 };
 
@@ -716,7 +716,7 @@ struct LocalTensorBuffer {
 
 template <class ArchTag>
 struct LocalTensorBuffer<ArchTag, AscendC::TPosition::A1> : LocalTensorBufferBase {
-    CATLASS_DEVICE LocalTensorBuffer()
+    PTO_DEVICE LocalTensorBuffer()
     {
         AscendC::TBuf<AscendC::TPosition::A1> buf;
         GetTPipePtr()->InitBuffer(buf, ArchTag::L1_SIZE);
@@ -726,7 +726,7 @@ struct LocalTensorBuffer<ArchTag, AscendC::TPosition::A1> : LocalTensorBufferBas
 
 template <class ArchTag>
 struct LocalTensorBuffer<ArchTag, AscendC::TPosition::A2> : LocalTensorBufferBase {
-    CATLASS_DEVICE LocalTensorBuffer()
+    PTO_DEVICE LocalTensorBuffer()
     {
         AscendC::TBuf<AscendC::TPosition::A2> buf;
         GetTPipePtr()->InitBuffer(buf, ArchTag::L0A_SIZE);
@@ -736,7 +736,7 @@ struct LocalTensorBuffer<ArchTag, AscendC::TPosition::A2> : LocalTensorBufferBas
 
 template <class ArchTag>
 struct LocalTensorBuffer<ArchTag, AscendC::TPosition::B2> : LocalTensorBufferBase {
-    CATLASS_DEVICE LocalTensorBuffer()
+    PTO_DEVICE LocalTensorBuffer()
     {
         AscendC::TBuf<AscendC::TPosition::B2> buf;
         GetTPipePtr()->InitBuffer(buf, ArchTag::L0B_SIZE);
@@ -746,7 +746,7 @@ struct LocalTensorBuffer<ArchTag, AscendC::TPosition::B2> : LocalTensorBufferBas
 
 template <class ArchTag>
 struct LocalTensorBuffer<ArchTag, AscendC::TPosition::C2> : LocalTensorBufferBase {
-    CATLASS_DEVICE LocalTensorBuffer()
+    PTO_DEVICE LocalTensorBuffer()
     {
         AscendC::TBuf<AscendC::TPosition::C2> buf;
         GetTPipePtr()->InitBuffer(buf, ArchTag::BIAS_SIZE);
@@ -756,7 +756,7 @@ struct LocalTensorBuffer<ArchTag, AscendC::TPosition::C2> : LocalTensorBufferBas
 
 template <class ArchTag>
 struct LocalTensorBuffer<ArchTag, AscendC::TPosition::CO1> : LocalTensorBufferBase {
-    CATLASS_DEVICE LocalTensorBuffer()
+    PTO_DEVICE LocalTensorBuffer()
     {
         AscendC::TBuf<AscendC::TPosition::CO1> buf;
         GetTPipePtr()->InitBuffer(buf, ArchTag::L0C_SIZE);
@@ -766,7 +766,7 @@ struct LocalTensorBuffer<ArchTag, AscendC::TPosition::CO1> : LocalTensorBufferBa
 
 template <class ArchTag>
 struct LocalTensorBuffer<ArchTag, AscendC::TPosition::VECCALC> : LocalTensorBufferBase {
-    CATLASS_DEVICE LocalTensorBuffer()
+    PTO_DEVICE LocalTensorBuffer()
     {
         AscendC::TBuf<AscendC::TPosition::VECCALC> buf;
         GetTPipePtr()->InitBuffer(buf, ArchTag::UB_SIZE);
@@ -776,7 +776,7 @@ struct LocalTensorBuffer<ArchTag, AscendC::TPosition::VECCALC> : LocalTensorBuff
 
 template <class ArchTag>
 struct LocalTensorBuffer<ArchTag, AscendC::TPosition::C2PIPE2GM> : LocalTensorBufferBase {
-    CATLASS_DEVICE LocalTensorBuffer()
+    PTO_DEVICE LocalTensorBuffer()
     {
         AscendC::TBuf<AscendC::TPosition::C2PIPE2GM> buf;
         GetTPipePtr()->InitBuffer(buf, ArchTag::FIXBUF_SIZE);
@@ -795,7 +795,7 @@ struct Resource {
     LocalTensorBuffer<ArchTag, AscendC::TPosition::VECCALC> ubBuf;
     LocalTensorBuffer<ArchTag, AscendC::TPosition::C2PIPE2GM> fpBuf;
 
-    CATLASS_DEVICE Resource()
+    PTO_DEVICE Resource()
     {
         pipe.Destroy();
     }
@@ -877,7 +877,7 @@ struct L1AlignHelper {
 };
 
 template <class Element>
-struct L1AlignHelper<Element, layout::RowMajor> {
+struct L1AlignHelper<Element, layout::ND> {
     static constexpr uint32_t ELE_NUM_PER_C0 = BYTE_PER_C0 / sizeof(Element);
     static constexpr uint32_t M_ALIGNED = C0_NUM_PER_FRACTAL;
     static constexpr uint32_t K_ALIGNED = ELE_NUM_PER_C0;
@@ -885,7 +885,7 @@ struct L1AlignHelper<Element, layout::RowMajor> {
 };
 
 template <class Element>
-struct L1AlignHelper<Element, layout::zN> {
+struct L1AlignHelper<Element, layout::Zn> {
     static constexpr uint32_t ELE_NUM_PER_C0 = BYTE_PER_C0 / sizeof(Element);
     static constexpr uint32_t M_ALIGNED = C0_NUM_PER_FRACTAL;
     static constexpr uint32_t K_ALIGNED = ELE_NUM_PER_C0;
@@ -903,13 +903,13 @@ struct L1ATypeSelector<GemmType<Element, layout::VectorLayout>> {
 };
 
 template <class Element>
-struct L1ATypeSelector<GemmType<Element, layout::RowMajor>> {
-    using L1AType = GemmType<Element, layout::zN, AscendC::TPosition::A1>;
+struct L1ATypeSelector<GemmType<Element, layout::ND>> {
+    using L1AType = GemmType<Element, layout::Zn, AscendC::TPosition::A1>;
 };
 
 template <class Element>
-struct L1ATypeSelector<GemmType<Element, layout::zN>> {
-    using L1AType = GemmType<Element, layout::zN, AscendC::TPosition::A1>;
+struct L1ATypeSelector<GemmType<Element, layout::Zn>> {
+    using L1AType = GemmType<Element, layout::Zn, AscendC::TPosition::A1>;
 };
 
 template <class GmBType>
@@ -918,8 +918,8 @@ struct L1BTypeSelector {
 };
 
 template <class Element>
-struct L1BTypeSelector<GemmType<Element, layout::zN>> {
-    using L1BType = GemmType<Element, layout::zN, AscendC::TPosition::A1>;
+struct L1BTypeSelector<GemmType<Element, layout::Zn>> {
+    using L1BType = GemmType<Element, layout::Zn, AscendC::TPosition::A1>;
 };
 
 }  // namespace helper
@@ -987,15 +987,15 @@ struct CopyGmToL1 {
 
 template <class Element>
 struct CopyGmToL1<Arch::AtlasA2,
-                  GemmType<Element, layout::RowMajor>,
-                  GemmType<Element, layout::zN, AscendC::TPosition::A1>> {
-    using LayoutDst = layout::zN;
-    using LayoutSrc = layout::RowMajor;
+                  GemmType<Element, layout::ND>,
+                  GemmType<Element, layout::Zn, AscendC::TPosition::A1>> {
+    using LayoutDst = layout::Zn;
+    using LayoutSrc = layout::ND;
     static constexpr uint32_t ELE_NUM_PER_C0 = BYTE_PER_C0 / sizeof(Element);
 
-    CATLASS_DEVICE CopyGmToL1() = default;
+    PTO_DEVICE CopyGmToL1() = default;
 
-    CATLASS_DEVICE void operator()(AscendC::LocalTensor<Element> const &dstTensor,
+    PTO_DEVICE void operator()(AscendC::LocalTensor<Element> const &dstTensor,
                                    AscendC::GlobalTensor<Element> const &srcTensor,
                                    LayoutDst const &layoutDst,
                                    LayoutSrc const &layoutSrc)
@@ -1025,15 +1025,15 @@ struct CopyGmToL1<Arch::AtlasA2,
 
 template <class ArchTag, class Element>
 struct CopyGmToL1<ArchTag,
-                  GemmType<Element, layout::zN>,
-                  GemmType<Element, layout::zN, AscendC::TPosition::A1>> {
-    using LayoutDst = layout::zN;
-    using LayoutSrc = layout::zN;
+                  GemmType<Element, layout::Zn>,
+                  GemmType<Element, layout::Zn, AscendC::TPosition::A1>> {
+    using LayoutDst = layout::Zn;
+    using LayoutSrc = layout::Zn;
     static constexpr uint32_t ELE_NUM_PER_C0 = BYTE_PER_C0 / sizeof(Element);
 
-    CATLASS_DEVICE CopyGmToL1() = default;
+    PTO_DEVICE CopyGmToL1() = default;
 
-    CATLASS_DEVICE void operator()(AscendC::LocalTensor<Element> const &dstTensor,
+    PTO_DEVICE void operator()(AscendC::LocalTensor<Element> const &dstTensor,
                                    AscendC::GlobalTensor<Element> const &srcTensor,
                                    LayoutDst const &layoutDst,
                                    LayoutSrc const &layoutSrc)
@@ -1070,9 +1070,9 @@ struct CopyGmToL1<ArchTag,
     using LayoutSrc = layout::VectorLayout;
     static constexpr uint32_t ELE_NUM_PER_C0 = BYTE_PER_C0 / sizeof(Element);
 
-    CATLASS_DEVICE CopyGmToL1() = default;
+    PTO_DEVICE CopyGmToL1() = default;
 
-    CATLASS_DEVICE void operator()(AscendC::LocalTensor<Element> const &dstTensor,
+    PTO_DEVICE void operator()(AscendC::LocalTensor<Element> const &dstTensor,
                                    AscendC::GlobalTensor<Element> const &srcTensor,
                                    LayoutDst const &layoutDst,
                                    LayoutSrc const &layoutSrc)
@@ -1094,15 +1094,15 @@ struct CopyL1ToL0A {
 
 template <class ArchTag, class Element>
 struct CopyL1ToL0A<ArchTag,
-                   GemmType<Element, layout::zN, AscendC::TPosition::A1>,
-                   GemmType<Element, layout::zZ, AscendC::TPosition::A2>> {
-    using LayoutDst = layout::zZ;
-    using LayoutSrc = layout::zN;
+                   GemmType<Element, layout::Zn, AscendC::TPosition::A1>,
+                   GemmType<Element, layout::Zz, AscendC::TPosition::A2>> {
+    using LayoutDst = layout::Zz;
+    using LayoutSrc = layout::Zn;
     static constexpr uint32_t ELE_NUM_PER_FRACTAL = BYTE_PER_FRACTAL / sizeof(Element);
 
-    CATLASS_DEVICE CopyL1ToL0A() = default;
+    PTO_DEVICE CopyL1ToL0A() = default;
 
-    CATLASS_DEVICE void operator()(AscendC::LocalTensor<Element> const &dstTensor,
+    PTO_DEVICE void operator()(AscendC::LocalTensor<Element> const &dstTensor,
                                    AscendC::LocalTensor<Element> const &srcTensor,
                                    LayoutDst const &layoutDst,
                                    LayoutSrc const &layoutSrc)
@@ -1123,10 +1123,10 @@ struct CopyL1ToL0A<ArchTag,
 };
 
 template <class ArchTag, class Element>
-struct CopyL1ToL0A<ArchTag, GemmType<Element, layout::zN, AscendC::TPosition::A1>>
+struct CopyL1ToL0A<ArchTag, GemmType<Element, layout::Zn, AscendC::TPosition::A1>>
     : CopyL1ToL0A<ArchTag,
-                  GemmType<Element, layout::zN, AscendC::TPosition::A1>,
-                  GemmType<Element, layout::zZ, AscendC::TPosition::A2>> {};
+                  GemmType<Element, layout::Zn, AscendC::TPosition::A1>,
+                  GemmType<Element, layout::Zz, AscendC::TPosition::A2>> {};
 
 template <class ArchTag, class L1Type, class L0Type = void>
 struct CopyL1ToL0B {
@@ -1135,17 +1135,17 @@ struct CopyL1ToL0B {
 
 template <class ArchTag>
 struct CopyL1ToL0B<ArchTag,
-                   GemmType<int8_t, layout::zN, AscendC::TPosition::A1>,
-                   GemmType<int8_t, layout::nZ, AscendC::TPosition::B2>> {
+                   GemmType<int8_t, layout::Zn, AscendC::TPosition::A1>,
+                   GemmType<int8_t, layout::Nz, AscendC::TPosition::B2>> {
     using Element = int8_t;
-    using LayoutDst = layout::nZ;
-    using LayoutSrc = layout::zN;
+    using LayoutDst = layout::Nz;
+    using LayoutSrc = layout::Zn;
     static constexpr uint32_t ELE_NUM_PER_C0 = BYTE_PER_C0 / sizeof(Element);
     static constexpr uint32_t ELE_NUM_PER_FRACTAL = BYTE_PER_FRACTAL / sizeof(Element);
 
-    CATLASS_DEVICE CopyL1ToL0B() = default;
+    PTO_DEVICE CopyL1ToL0B() = default;
 
-    CATLASS_DEVICE void operator()(AscendC::LocalTensor<Element> const &dstTensor,
+    PTO_DEVICE void operator()(AscendC::LocalTensor<Element> const &dstTensor,
                                    AscendC::LocalTensor<Element> const &srcTensor,
                                    LayoutDst const &layoutDst,
                                    LayoutSrc const &layoutSrc)
@@ -1166,10 +1166,10 @@ struct CopyL1ToL0B<ArchTag,
 };
 
 template <class ArchTag>
-struct CopyL1ToL0B<ArchTag, GemmType<int8_t, layout::zN, AscendC::TPosition::A1>>
+struct CopyL1ToL0B<ArchTag, GemmType<int8_t, layout::Zn, AscendC::TPosition::A1>>
     : CopyL1ToL0B<ArchTag,
-                  GemmType<int8_t, layout::zN, AscendC::TPosition::A1>,
-                  GemmType<int8_t, layout::nZ, AscendC::TPosition::B2>> {};
+                  GemmType<int8_t, layout::Zn, AscendC::TPosition::A1>,
+                  GemmType<int8_t, layout::Nz, AscendC::TPosition::B2>> {};
 
 template <class ArchTag, class L1Type, class L0Type = void>
 struct CopyL1ToFP {
@@ -1184,9 +1184,9 @@ struct CopyL1ToFP<ArchTag,
     using LayoutSrc = layout::VectorLayout;
     static constexpr uint32_t ELE_NUM_PER_FP = BYTE_PER_BLK_FP / sizeof(ElementSrc);
 
-    CATLASS_DEVICE CopyL1ToFP() = default;
+    PTO_DEVICE CopyL1ToFP() = default;
 
-    CATLASS_DEVICE void operator()(AscendC::LocalTensor<ElementDst> dstTensor,
+    PTO_DEVICE void operator()(AscendC::LocalTensor<ElementDst> dstTensor,
                                    AscendC::LocalTensor<ElementSrc> srcTensor,
                                    LayoutDst layoutDst,
                                    LayoutSrc layoutSrc)
@@ -1211,29 +1211,29 @@ struct CopyL0CToGm {
 template <class ElementAccumulator_, class ElementDst_, ScaleGranularity Granularity_, bool ReluEnable_>
 struct CopyL0CToGm<Arch::AtlasA2,
                    ElementAccumulator_,
-                   GemmType<ElementDst_, layout::RowMajor>,
+                   GemmType<ElementDst_, layout::ND>,
                    Granularity_,
                    ReluEnable_> {
     using ArchTag = Arch::AtlasA2;
     using ElementDst = ElementDst_;
     using ElementSrc = ElementAccumulator_;
-    using LayoutSrc = layout::zN;
-    using LayoutDst = layout::RowMajor;
+    using LayoutSrc = layout::Zn;
+    using LayoutDst = layout::ND;
     static constexpr auto quantPre = CopyL0CToGmQuantMode<ArchTag, ElementSrc, ElementDst, Granularity_>::VALUE;
     static constexpr auto reluEn = ReluEnable_;
 
     struct Params {
         float scale = 1.0f;
-        CATLASS_HOST_DEVICE Params() = default;
-        CATLASS_HOST_DEVICE explicit Params(float scale_) : scale(scale_) {}
+        PTO_HOST_DEVICE Params() = default;
+        PTO_HOST_DEVICE explicit Params(float scale_) : scale(scale_) {}
     };
 
     Params params;
 
-    CATLASS_DEVICE CopyL0CToGm() = default;
-    CATLASS_DEVICE CopyL0CToGm(Params const &params_) : params(params_) {}
+    PTO_DEVICE CopyL0CToGm() = default;
+    PTO_DEVICE CopyL0CToGm(Params const &params_) : params(params_) {}
 
-    CATLASS_DEVICE void operator()(AscendC::GlobalTensor<ElementDst> const &dst,
+    PTO_DEVICE void operator()(AscendC::GlobalTensor<ElementDst> const &dst,
                                    AscendC::LocalTensor<ElementSrc> const &src,
                                    LayoutDst const &dstLayout,
                                    LayoutSrc const &srcLayout,
@@ -1250,7 +1250,7 @@ struct CopyL0CToGm<Arch::AtlasA2,
         AscendC::Fixpipe<ElementDst, ElementSrc, AscendC::CFG_ROW_MAJOR>(dst, src, intriParams);
     }
 
-    CATLASS_DEVICE void operator()(AscendC::GlobalTensor<ElementDst> const &dst,
+    PTO_DEVICE void operator()(AscendC::GlobalTensor<ElementDst> const &dst,
                                    AscendC::LocalTensor<ElementSrc> const &src,
                                    AscendC::LocalTensor<uint64_t> cbufWorkspace,
                                    LayoutDst const &dstLayout,
@@ -1305,31 +1305,31 @@ struct GemmIdentityBlockSwizzle {
     MatrixCoord tileMN;
     MatrixCoord loopsMN;
 
-    CATLASS_DEVICE GemmIdentityBlockSwizzle() = default;
+    PTO_DEVICE GemmIdentityBlockSwizzle() = default;
 
-    CATLASS_DEVICE GemmIdentityBlockSwizzle(GemmCoord const &problemShape_, MatrixCoord const &tileMN_)
+    PTO_DEVICE GemmIdentityBlockSwizzle(GemmCoord const &problemShape_, MatrixCoord const &tileMN_)
         : problemShape(problemShape_), tileMN(tileMN_)
     {
-        loopsMN = Catlass::CeilDiv(MatrixCoord(problemShape.GetCoordMN()), tileMN);
+        loopsMN = pto_ext::CeilDiv(MatrixCoord(problemShape.GetCoordMN()), tileMN);
     }
 
-    CATLASS_DEVICE void Update(GemmCoord const &problemShape_, MatrixCoord const &tileMN_)
+    PTO_DEVICE void Update(GemmCoord const &problemShape_, MatrixCoord const &tileMN_)
     {
         problemShape = problemShape_;
         tileMN = tileMN_;
-        loopsMN = Catlass::CeilDiv(MatrixCoord(problemShape.GetCoordMN()), tileMN);
+        loopsMN = pto_ext::CeilDiv(MatrixCoord(problemShape.GetCoordMN()), tileMN);
     }
 
-    CATLASS_DEVICE uint32_t GetCoreLoops() const
+    PTO_DEVICE uint32_t GetCoreLoops() const
     {
         return loopsMN.row() * loopsMN.column();
     }
 
-    CATLASS_DEVICE GemmCoord GetBlockCoord(uint32_t taskIdx)
+    PTO_DEVICE GemmCoord GetBlockCoord(uint32_t taskIdx)
     {
         uint32_t innerIdx = taskIdx % GetCoreLoops();
         if constexpr (SwizzleDirection == 0) {
-            uint32_t tileBlockLoop = Catlass::CeilDiv(loopsMN.row(), SwizzleOffset);
+            uint32_t tileBlockLoop = pto_ext::CeilDiv(loopsMN.row(), SwizzleOffset);
             uint32_t tileBlockIdx = innerIdx / (SwizzleOffset * loopsMN.column());
             uint32_t inTileBlockIdx = innerIdx % (SwizzleOffset * loopsMN.column());
             uint32_t nRow = SwizzleOffset;
@@ -1343,7 +1343,7 @@ struct GemmIdentityBlockSwizzle {
             }
             return GemmCoord{mIdx, nIdx, 0};
         } else {
-            uint32_t tileBlockLoop = Catlass::CeilDiv(loopsMN.column(), SwizzleOffset);
+            uint32_t tileBlockLoop = pto_ext::CeilDiv(loopsMN.column(), SwizzleOffset);
             uint32_t tileBlockIdx = innerIdx / (SwizzleOffset * loopsMN.row());
             uint32_t inTileBlockIdx = innerIdx % (SwizzleOffset * loopsMN.row());
             uint32_t nCol = SwizzleOffset;
@@ -1359,7 +1359,7 @@ struct GemmIdentityBlockSwizzle {
         }
     }
 
-    CATLASS_DEVICE GemmCoord GetActualBlockShape(GemmCoord blockCoord)
+    PTO_DEVICE GemmCoord GetActualBlockShape(GemmCoord blockCoord)
     {
         uint32_t mActual = (blockCoord.m() == (loopsMN.row() - 1)) ?
             (problemShape.m() - blockCoord.m() * tileMN.row()) : tileMN.row();
@@ -1434,16 +1434,16 @@ class BlockEpilogue {
 
 }  // namespace Epilogue
 
-}  // namespace Catlass
+}  // namespace pto_ext
 
-namespace DispatchFFNCombineCompat {
+namespace pto_ext::support {
 
-constexpr uint64_t kL2Offset = Catlass::L2_OFFSET;
+constexpr uint64_t kL2Offset = pto_ext::L2_OFFSET;
 
 struct NoopCallback {
-    CATLASS_DEVICE void operator()() const {}
+    PTO_DEVICE void operator()() const {}
 };
 
-}  // namespace DispatchFFNCombineCompat
+}  // namespace pto_ext::support
 
 #endif // DISPATH_POLICY_CUSTOM_HPP
