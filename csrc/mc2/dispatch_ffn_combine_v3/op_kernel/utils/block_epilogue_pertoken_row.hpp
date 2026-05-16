@@ -11,14 +11,7 @@
 #ifndef CATLASS_EPILOGUE_BLOCK_EPILOGUE_PER_TOKEN_ROW_HPP
 #define CATLASS_EPILOGUE_BLOCK_EPILOGUE_PER_TOKEN_ROW_HPP
 
-#include "catlass/catlass.hpp"
-#include "catlass/arch/resource.hpp"
-#include "catlass/epilogue/dispatch_policy.hpp"
-#include "catlass/gemm_coord.hpp"
-#include "catlass/matrix_coord.hpp"
-#include "catlass/layout/layout.hpp"
-#include "catlass/detail/callback.hpp"
-#include "catlass/epilogue/block/block_epilogue.hpp"
+#include "dispatch_policy_custom.hpp"
 
 #include <pto/common/pto_tile.hpp>
 #include <pto/pto-inst.hpp>
@@ -118,10 +111,6 @@ public:
         "The layout template parameters of BlockEpilogue are wrong"
     );
 
-
-    // Tile copy
-    using CopyGmToUbC = typename TileCopy_::CopyGmToUbC;
-    using CopyUbToGmD = typename TileCopy_::CopyUbToGmD;
 
     struct Params {
         __gm__ int32_t *ptrTokenPerExpert{nullptr};
@@ -286,9 +275,6 @@ private:
     AscendC::LocalTensor<float> ubCFp32List[UB_STAGES];
     AscendC::LocalTensor<float> ubMulList[UB_STAGES];
 
-
-    CopyGmToUbC copyGmToUbC;
-    CopyUbToGmD copyUbToGmD;
 };
 
 }  // namespace Catlass::Epilogue::Block

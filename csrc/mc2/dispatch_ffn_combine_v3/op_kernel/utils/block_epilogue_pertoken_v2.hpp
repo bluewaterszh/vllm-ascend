@@ -1,13 +1,7 @@
 #ifndef CATLASS_EPILOGUE_BLOCK_EPILOGUE_PER_TOKEN_V2_ONLY_HPP
 #define CATLASS_EPILOGUE_BLOCK_EPILOGUE_PER_TOKEN_V2_ONLY_HPP
 
-#include "catlass/catlass.hpp"
-#include "catlass/arch/resource.hpp"
-#include "catlass/epilogue/dispatch_policy.hpp"
-#include "catlass/gemm_coord.hpp"
-#include "catlass/matrix_coord.hpp"
-#include "catlass/layout/layout.hpp"
-#include "catlass/detail/callback.hpp"
+#include "dispatch_policy_custom.hpp"
 
 #include <pto/common/pto_tile.hpp>
 #include <pto/pto-inst.hpp>
@@ -121,9 +115,6 @@ public:
     using LayoutPerTokenScale = LayoutPerTokenScale_;
     using ElementD = typename DType_::Element;
     using LayoutD = typename DType_::Layout;
-
-    using CopyGmToUbC = typename TileCopy_::CopyGmToUbC;
-    using CopyUbToGmD = typename TileCopy_::CopyUbToGmD;
 
     struct Params {
         __gm__ int32_t *ptrTokenPerExpert{nullptr};
@@ -347,8 +338,6 @@ private:
     
     int32_t repeat = 128;
 
-    CopyGmToUbC copyGmToUbC;
-    CopyUbToGmD copyUbToGmD;
     AscendC::GlobalTensor<int32_t> tokenPerExpert;
     Layout3D tokenPerExpertLayout;
 };

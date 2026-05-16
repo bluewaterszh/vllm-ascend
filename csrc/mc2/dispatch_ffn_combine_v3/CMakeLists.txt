@@ -20,7 +20,6 @@ if(NOT DEFINED ENV{ASCEND_HOME_PATH})
 endif()
 set(ASCEND_HOME_PATH $ENV{ASCEND_HOME_PATH})
 set(ASCEND_CANN_PACKAGE_PATH ${ASCEND_HOME_PATH})
-set(CATLASS_INCLUDE ${CMAKE_CURRENT_SOURCE_DIR}/../../third_party/catlass/include)
 set(PTO_ROOT "/home/ntlab/zy/code/zhangyuan/pto-isa-zy" CACHE PATH "Path to PTO ISA repository")
 set(SOC_VERSION "ascend910_93" CACHE STRING "Ascend SoC version")
 
@@ -77,14 +76,9 @@ ascendc_include_directories(dispatch_ffn_combine_v3_kernel PRIVATE
     ${ASCEND_HOME_PATH}/aarch64-linux/asc/include/adv_api/hccl
 )
 
-ascendc_compile_options(dispatch_ffn_combine_v3_kernel PRIVATE
-    -I${CATLASS_INCLUDE}
-)
-
 ascendc_compile_definitions(dispatch_ffn_combine_v3_kernel PRIVATE
     HCCL_COMM
     PTO_NPU_ARCH_A2A3
-    CATLASS_ARCH=2201
     DTYPE_W1=int8_t
     DTYPE_OUT=half
 )
@@ -120,7 +114,6 @@ target_include_directories(dispatch_ffn_combine_v3 PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/op_kernel
     ${CMAKE_CURRENT_SOURCE_DIR}/op_kernel/utils
     ${CMAKE_CURRENT_SOURCE_DIR}/op_kernel/moe_init_routing_quant_v2
-    ${CATLASS_INCLUDE}
     ${ASCEND_HOME_PATH}/include
     ${ASCEND_HOME_PATH}/aarch64-linux/asc/include
     ${ASCEND_HOME_PATH}/aarch64-linux/asc/include/interface

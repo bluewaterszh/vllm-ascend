@@ -109,11 +109,7 @@ bash csrc/mc2/dispatch_ffn_combine_v3/run.sh \
   --max-output-size 32
 ```
 
-If the baseline commit is checked out in a detached worktree, initialize the CATLASS submodule first:
-
-```bash
-git -C <worktree> submodule update --init --recursive csrc/third_party/catlass
-```
+If the baseline commit is checked out in a detached worktree, initialize its third-party submodules first.
 
 Observed results:
 
@@ -369,3 +365,47 @@ Current status:
 Reference functional regression pass after the full Stage 3b bundle:
 - small case: kernel `27.90 us`, e2e `121.41 us`, `PASS`
 - large case: kernel `51.60 us`, e2e `149.54 us`, `PASS`
+
+## Catlass cleanup checkpoint
+
+Current status:
+- `dispatch_ffn_combine_v3` source and CMake no longer depend on Catlass include paths or `CATLASS_ARCH`.
+- The live int8/zN/A2 path now builds against the local compat surface in `op_kernel/utils/dispatch_policy_custom.hpp`.
+- A fresh rebuild after removing the Catlass tail still keeps both reference cases at `PASS`.
+
+Reference commands:
+
+```bash
+bash csrc/mc2/dispatch_ffn_combine_v3/run.sh \
+  --soc ascend910_93 \
+  --world-size 2 \
+  --m 16 \
+  --k 128 \
+  --n 128 \
+  --topk 2 \
+  --experts 2 \
+  --max-output-size 32
+
+bash csrc/mc2/dispatch_ffn_combine_v3/run.sh \
+  --soc ascend910_93 \
+  --world-size 2 \
+  --m 2049 \
+  --k 128 \
+  --n 128 \
+  --topk 2 \
+  --experts 2 \
+  --max-output-size 4098
+```
+
+Observed results after the Catlass cleanup checkpoint:
+- small case: kernel `21.79 us`, e2e `94.08 us`, `PASS`
+- large case: kernel `28.89 us`, e2e `125.03 us`, `PASS`
+
+Performance state relative to the earlier full Stage 3b function-first checkpoint:
+- small case: kernel `-21.9%`, e2e `-22.5%`
+- large case: kernel `-44.0%`, e2e `-16.4%`
+
+Interpretation:
+- The Catlass deshelling did not break the output contract or standalone build flow.
+- On this checkpoint, performance is also better than the earlier full Stage 3b function-first reference instead of merely holding steady.
+- The remaining build noise is the PTO macro redefinition warning, not a Catlass dependency.

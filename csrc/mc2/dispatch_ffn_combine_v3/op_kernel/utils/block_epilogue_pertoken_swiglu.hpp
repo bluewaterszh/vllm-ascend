@@ -11,13 +11,7 @@
 #ifndef CATLASS_EPILOGUE_BLOCK_EPILOGUE_PER_TOKEN_SWIGLU_HPP
 #define CATLASS_EPILOGUE_BLOCK_EPILOGUE_PER_TOKEN_SWIGLU_HPP
 
-#include "catlass/catlass.hpp"
-#include "catlass/arch/resource.hpp"
-#include "catlass/epilogue/dispatch_policy.hpp"
-#include "catlass/gemm_coord.hpp"
-#include "catlass/matrix_coord.hpp"
-#include "catlass/layout/layout.hpp"
-#include "catlass/detail/callback.hpp"
+#include "dispatch_policy_custom.hpp"
 
 #include <pto/common/pto_tile.hpp>
 #include <pto/pto-inst.hpp>
@@ -118,11 +112,6 @@ public:
         "The layout template parameters of BlockEpilogue are wrong"
     );
 
-    // Tile copy
-    using CopyGmToUbC = typename TileCopy_::CopyGmToUbC;
-    using CopyUbToGmD = typename TileCopy_::CopyUbToGmD;
-    using CopyUbToGmDequantScale = Epilogue::Tile::CopyUb2Gm<ArchTag, Gemm::GemmType<ElementPerTokenScale, LayoutPerTokenScale>>;
-
     struct Params {
         __gm__ ElementPerTokenScale *ptrPerTokenScale{nullptr};
         LayoutPerTokenScale layoutPerTokenScale{};
@@ -197,6 +186,7 @@ public:
         params = params_;
     }
     // Each tile is 1x7168, and each block covers all tokens for one expert = [group[i], 7168]
+    template <typename CallbackT = DispatchFFNCombineCompat::NoopCallback>
     CATLASS_DEVICE
     void operator() (
         AscendC::GlobalTensor<ElementC> const &gmC,
@@ -206,7 +196,7 @@ public:
         AscendC::GlobalTensor<ElementPerTokenScale> const &gmPerTokenScale2,
 
         uint32_t epilogueCoreNum = 40,
-        Callback &&callback = Callback{}
+        CallbackT &&callback = CallbackT{}
     )
     {
         callback();
@@ -356,10 +346,6 @@ private:
     AscendC::LocalTensor<half> ubQuantF16List[UB_STAGES];
     AscendC::LocalTensor<float> ubPerTokenScaleOutput;
 
-
-    CopyGmToUbC copyGmToUbC;
-    CopyUbToGmD copyUbToGmD;
-    CopyUbToGmDequantScale copyUbToGmDequantScale;
 };
 
 }  // namespace Catlass::Epilogue::Block

@@ -16,14 +16,7 @@
 #include <pto/common/pto_tile.hpp>
 #include <pto/pto-inst.hpp>
 
-#include "catlass/catlass.hpp"
-#include "catlass/arch/cross_core_sync.hpp"
-#include "catlass/arch/resource.hpp"
-#include "catlass/coord.hpp"
-#include "catlass/detail/callback.hpp"
-#include "catlass/gemm_coord.hpp"
-#include "catlass/matrix_coord.hpp"
-#include "catlass/epilogue/tile/tile_copy.hpp"
+#include "utils/dispatch_policy_custom.hpp"
 
 #ifndef HCCL_COMM
     #include "block_mmad_preload_async_fixpipe_quant.hpp"
@@ -39,7 +32,7 @@
     #include "moe_init_routing_quant_v2/moe_v2_fullload_dynamic_quant.h"
     #include "moe_token_unpermute.h"
     #include "get_tensor_addr.hpp"
-    inline __gm__ struct OpSystemRunCfg g_opSystemRunCfg{Catlass::L2_OFFSET};
+    inline __gm__ struct OpSystemRunCfg g_opSystemRunCfg{DispatchFFNCombineCompat::kL2Offset};
 #else
     #include "utils/block_mmad_preload_async_fixpipe_quant.hpp"
     #include "utils/copy_gm_to_l1_custom.hpp"
@@ -431,12 +424,14 @@ private:
         AscendC::GlobalTensor<int32_t> expertIdxGm;
         expertIdxGm.SetGlobalBuffer(reinterpret_cast<__gm__ int32_t*>(params.expertIdx));
 
-        int32_t totalElements = m * topK;
-        int32_t base = totalElements / coreNum;
-        int32_t rem = totalElements % coreNum;
+        uint32_t totalElements = static_cast<uint32_t>(m * topK);
+        uint32_t base = totalElements / coreNum;
+        uint32_t rem = totalElements % coreNum;
 
-        int32_t startIdx = coreIdx * base + min(coreIdx, rem);
-        int32_t endIdx = (coreIdx + 1) * base + min(coreIdx + 1, rem);
+        uint32_t startCarry = (coreIdx < rem) ? coreIdx : rem;
+        uint32_t endCarry = ((coreIdx + 1) < rem) ? (coreIdx + 1) : rem;
+        int32_t startIdx = static_cast<int32_t>(coreIdx * base + startCarry);
+        int32_t endIdx = static_cast<int32_t>((coreIdx + 1) * base + endCarry);
 
         AscendC::LocalTensor<int32_t> tmpExpertIdx = resource.ubBuf.template GetBufferByByte<int32_t>(0);
         int32_t copySize = endIdx - startIdx;
