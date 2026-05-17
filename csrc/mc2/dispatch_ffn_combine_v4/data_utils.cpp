@@ -26,6 +26,9 @@ void PrintPerfRecord(const PerfRecord& record)
         << " bytes=" << record.bytes
         << " items=" << record.items
         << " bandwidth_GBps=" << bandwidthGbps;
+    if (!record.extraKv.empty()) {
+        oss << ' ' << record.extraKv;
+    }
     std::cout << oss.str() << '\n';
 }
 

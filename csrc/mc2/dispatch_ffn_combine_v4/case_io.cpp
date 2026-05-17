@@ -11,7 +11,8 @@ namespace {
 
 std::vector<uint8_t> MakeDispatchRowPayload(const RoutingFixture& fixture,
                                             uint32_t srcRank,
-                                            uint32_t rowIdx) {
+                                            uint32_t rowIdx)
+{
     std::vector<uint8_t> row(fixture.hiddenBytes, 0);
     const uint8_t value = static_cast<uint8_t>(srcRank * 16 + rowIdx + 1);
     std::fill(row.begin(), row.end(), value);
@@ -22,6 +23,8 @@ ComputeFixture BuildComputeFixture(uint32_t localRank)
 {
     ComputeFixture fixture;
     fixture.input = {1.0f, 2.0f};
+    fixture.quantInput = {2, 4};
+    fixture.inputScale = {0.5f};
     fixture.weight1 = {
         localRank == 0 ? 2.0f : 4.0f, 0.0f, 2.0f, 0.0f,
         0.0f, 0.0f, 0.0f, 0.0f,
@@ -33,16 +36,22 @@ ComputeFixture BuildComputeFixture(uint32_t localRank)
     return fixture;
 }
 
+float ProducerScalarForRank(uint32_t rank)
+{
+    return BuildHostComputeOracle(rank).gmm2Out.empty() ? 0.0f : BuildHostComputeOracle(rank).gmm2Out[0];
+}
+
 }  // namespace
 
-RoutingFixture BuildTwoRankRoutingFixtureForRank1() {
+RoutingFixture BuildTwoRankRoutingFixtureForRank1()
+{
     RoutingFixture fixture;
     fixture.worldSize = 2;
     fixture.expertsPerRank = 2;
     fixture.topk = 2;
     fixture.maxOutputSize = 8;
     fixture.hiddenBytes = 256;
-    fixture.outputBytes = 512;
+    fixture.outputBytes = sizeof(float);
     fixture.rowsPerRank = {2, 2};
     fixture.xActiveMaskPerRank = {
         {1, 1},
@@ -63,14 +72,15 @@ RoutingFixture BuildTwoRankRoutingFixtureForRank1() {
     return fixture;
 }
 
-RoutingFixture BuildTwoRankMaskAndCapacityFixtureForRank1() {
+RoutingFixture BuildTwoRankMaskAndCapacityFixtureForRank1()
+{
     RoutingFixture fixture;
     fixture.worldSize = 2;
     fixture.expertsPerRank = 2;
     fixture.topk = 2;
     fixture.maxOutputSize = 3;
     fixture.hiddenBytes = 256;
-    fixture.outputBytes = 512;
+    fixture.outputBytes = sizeof(float);
     fixture.rowsPerRank = {2, 2};
     fixture.xActiveMaskPerRank = {
         {1, 1},
@@ -91,7 +101,8 @@ RoutingFixture BuildTwoRankMaskAndCapacityFixtureForRank1() {
     return fixture;
 }
 
-std::vector<uint8_t> BuildDispatchPublicationForRank(const RoutingFixture& fixture, uint32_t srcRank) {
+std::vector<uint8_t> BuildDispatchPublicationForRank(const RoutingFixture& fixture, uint32_t srcRank)
+{
     const auto raw = routing::ExpandBeforeCapacity(fixture);
     const auto executable = routing::KeepExecutableEntries(raw, fixture);
     const uint64_t segmentBytes = static_cast<uint64_t>(fixture.maxOutputSize) * fixture.hiddenBytes;
@@ -113,7 +124,8 @@ std::vector<uint8_t> BuildDispatchPublicationForRank(const RoutingFixture& fixtu
 
 std::vector<uint8_t> BuildHostDispatchOracle(const RoutingFixture& fixture,
                                              uint32_t localRank,
-                                             const routing::RoutingPlanBundle& plan) {
+                                             const routing::RoutingPlanBundle& plan)
+{
     std::vector<std::vector<uint8_t>> publications;
     publications.reserve(fixture.worldSize);
     for (uint32_t srcRank = 0; srcRank < fixture.worldSize; ++srcRank) {
@@ -138,11 +150,27 @@ HostComputeOracle BuildHostComputeOracle(uint32_t localRank)
 {
     HostComputeOracle oracle;
     oracle.fixture = BuildComputeFixture(localRank);
+    oracle.sideband = {
+        .payloadOffsetBytes = 0,
+        .scale1OffsetBytes = static_cast<uint64_t>(oracle.fixture.quantInput.size() * sizeof(int8_t)),
+        .scale2OffsetBytes = static_cast<uint64_t>(oracle.fixture.quantInput.size() * sizeof(int8_t) +
+                                                   oracle.fixture.inputScale.size() * sizeof(float)),
+        .slotCount = 2,
+    };
+    oracle.quantPayload = oracle.fixture.quantInput;
+    oracle.scale1 = oracle.fixture.inputScale;
+    oracle.scale2 = {1.0f};
+
+    std::vector<float> dequantInput(oracle.fixture.quantInput.size(), 0.0f);
+    for (size_t i = 0; i < oracle.fixture.quantInput.size(); ++i) {
+        dequantInput[i] = static_cast<float>(oracle.fixture.quantInput[i]) * oracle.fixture.inputScale[0];
+    }
+
     oracle.gmm1Out.assign(4, 0.0f);
     for (uint32_t n = 0; n < 4; ++n) {
         float acc = 0.0f;
         for (uint32_t k = 0; k < 2; ++k) {
-            acc += oracle.fixture.input[k] * oracle.fixture.weight1[k * 4 + n];
+            acc += dequantInput[k] * oracle.fixture.weight1[k * 4 + n];
         }
         oracle.gmm1Out[n] = acc;
     }
@@ -168,8 +196,19 @@ HostComputeOracle BuildHostComputeOracle(uint32_t localRank)
 HostCombineOracle BuildHostCombineOracle(uint32_t localRank)
 {
     HostCombineOracle oracle;
-    oracle.pushedPayload = {2.0f, 4.0f};
-    oracle.restoredRows = {localRank == 0 ? 3.5f : 0.0f};
+    const auto fixture = BuildTwoRankRoutingFixtureForRank1();
+    const auto raw = routing::ExpandBeforeCapacity(fixture);
+    const auto executable = routing::KeepExecutableEntries(raw, fixture);
+    const auto plan = routing::BuildRoutePlanForRank(fixture, localRank);
+    const float localScalar = ProducerScalarForRank(localRank);
+    oracle.pushedPayload.assign(plan.combineTasks.size(), localScalar);
+    oracle.restoredRows.assign(fixture.rowsPerRank.at(localRank), 0.0f);
+    for (const auto& entry : executable) {
+        if (entry.ownerRank != localRank) {
+            continue;
+        }
+        oracle.restoredRows.at(entry.rowIdx) += entry.prob * ProducerScalarForRank(entry.dstRank);
+    }
     return oracle;
 }
 
@@ -184,7 +223,29 @@ HostFullChainOracle BuildHostFullChainOracle(uint32_t localRank)
     return oracle;
 }
 
-bool CompareBytes(const std::vector<uint8_t>& lhs, const std::vector<uint8_t>& rhs) {
+OverlapTimeline BuildSteadyStateTimeline(uint32_t groupCount)
+{
+    OverlapTimeline timeline;
+    if (groupCount == 0) {
+        return timeline;
+    }
+    timeline.resize(groupCount + 2);
+    for (uint32_t tick = 0; tick < timeline.size(); ++tick) {
+        if (tick < groupCount) {
+            timeline[tick].push_back({OverlapStage::Dispatch, tick});
+        }
+        if (tick >= 1 && (tick - 1) < groupCount) {
+            timeline[tick].push_back({OverlapStage::Compute, tick - 1});
+        }
+        if (tick >= 2 && (tick - 2) < groupCount) {
+            timeline[tick].push_back({OverlapStage::Combine, tick - 2});
+        }
+    }
+    return timeline;
+}
+
+bool CompareBytes(const std::vector<uint8_t>& lhs, const std::vector<uint8_t>& rhs)
+{
     return lhs == rhs;
 }
 

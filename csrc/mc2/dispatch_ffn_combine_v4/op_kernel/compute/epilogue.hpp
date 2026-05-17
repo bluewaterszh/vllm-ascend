@@ -18,13 +18,18 @@ V4_FORCE_INLINE_AICORE void RunComputeOnlyKernel(__gm__ mc2::v4::ComputeOnlyPara
     if (AscendC::GetBlockIdx() != 0 || tiling->mode != static_cast<uint32_t>(mc2::v4::KernelMode::ComputeOnly)) {
         return;
     }
-    auto* input = reinterpret_cast<__gm__ float*>(params->input);
+    auto* quantInput = reinterpret_cast<__gm__ int8_t*>(params->quantInput);
+    auto* scale1 = reinterpret_cast<__gm__ float*>(params->scale1);
     auto* weight1 = reinterpret_cast<__gm__ float*>(params->weight1);
     auto* gmm1Out = reinterpret_cast<__gm__ float*>(params->gmm1Out);
     auto* swigluOut = reinterpret_cast<__gm__ float*>(params->swigluOut);
     auto* weight2 = reinterpret_cast<__gm__ float*>(params->weight2);
     auto* gmm2Out = reinterpret_cast<__gm__ float*>(params->gmm2Out);
-    RunGmm1Group(input, weight1, gmm1Out);
+    float dequantInput[2] = {0.0f, 0.0f};
+    for (uint32_t i = 0; i < 2; ++i) {
+        dequantInput[i] = static_cast<float>(quantInput[i]) * scale1[0];
+    }
+    RunGmm1Group(dequantInput, weight1, gmm1Out);
     RunSwiGluGroup(gmm1Out, swigluOut);
     RunGmm2Group(swigluOut, weight2, gmm2Out);
 }

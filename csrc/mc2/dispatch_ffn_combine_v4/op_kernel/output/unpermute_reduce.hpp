@@ -17,10 +17,16 @@ V4_FORCE_INLINE_AICORE void RunCombineRestorePhase(__gm__ mc2::v4::protocol::Rem
 {
     auto* localCombine = reinterpret_cast<__gm__ float*>(ctx->workspaceBase + ctx->combineRegionOffset);
     auto* restoredRows = reinterpret_cast<__gm__ float*>(params->restoredRows);
-    if (ctx->rank == 0) {
-        restoredRows[0] = localCombine[0] * 0.25f + localCombine[8] * 0.75f;
-    } else {
-        restoredRows[0] = 0.0f;
+    auto* expandedProb = reinterpret_cast<__gm__ float*>(params->expandedProb);
+    auto* rowRanges = reinterpret_cast<__gm__ mc2::v4::protocol::CombineRowRange*>(params->rowRanges);
+    for (uint32_t row = 0; row < params->localRowCount; ++row) {
+        float acc = 0.0f;
+        const uint32_t begin = rowRanges[row].begin;
+        const uint32_t end = rowRanges[row].end;
+        for (uint32_t idx = begin; idx < end; ++idx) {
+            acc += localCombine[idx * mc2::v4::protocol::kCombineTransportElems] * expandedProb[idx];
+        }
+        restoredRows[row] = acc;
     }
     dsb(DSB_DDR);
 }

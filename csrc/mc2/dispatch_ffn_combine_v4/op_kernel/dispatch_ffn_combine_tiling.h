@@ -41,10 +41,24 @@ struct StandaloneKernelTilingData {
     uint32_t taskCount = 0;
     uint32_t hiddenBytes = 0;
     uint32_t outputBytes = 0;
+    uint32_t groupId = 0;
+    uint32_t groupWidth = 0;
+};
+
+struct FullChainOverlapParams {
+    uint64_t dispatchTasks = 0;
+    uint64_t combineTasks = 0;
+    uint64_t queueState = 0;
+    uint64_t progressState = 0;
+    uint32_t groupCount = 0;
+    uint32_t reserved = 0;
 };
 
 struct ComputeOnlyParams {
     uint64_t input = 0;
+    uint64_t quantInput = 0;
+    uint64_t scale1 = 0;
+    uint64_t scale2 = 0;
     uint64_t weight1 = 0;
     uint64_t gmm1Out = 0;
     uint64_t swigluOut = 0;
@@ -55,6 +69,11 @@ struct ComputeOnlyParams {
 struct CombineOnlyParams {
     uint64_t localPartial = 0;
     uint64_t restoredRows = 0;
+    uint64_t combineTasks = 0;
+    uint64_t expandedProb = 0;
+    uint64_t rowRanges = 0;
+    uint32_t taskCount = 0;
+    uint32_t localRowCount = 0;
     uint32_t phase = 0;
     uint32_t reserved = 0;
 };

@@ -96,7 +96,9 @@ V4_FORCE_INLINE_AICORE void RunDispatchPullTask(__gm__ protocol::RemoteWindowCon
     __gm__ uint8_t* scratch = reinterpret_cast<__gm__ uint8_t*>(ctx->workspaceBase +
                                                                  ctx->controlRegionOffset +
                                                                  static_cast<uint64_t>(AscendC::GetBlockIdx()) * task->hiddenBytes);
-    pto::comm::TWAIT(ready, task->readyEpoch, pto::comm::WaitCmp::GE);
+    if (!pto::comm::TTEST(ready, task->readyEpoch, pto::comm::WaitCmp::GE)) {
+        pto::comm::TWAIT(ready, task->readyEpoch, pto::comm::WaitCmp::GE);
+    }
     if ((task->hiddenBytes & 0x3U) == 0) {
         auto* srcWords = reinterpret_cast<__gm__ uint32_t*>(src);
         auto* dstWords = reinterpret_cast<__gm__ uint32_t*>(dst);

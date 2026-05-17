@@ -24,6 +24,13 @@ struct ModeConfig {
     std::string mode = "default";
     uint32_t localRank = 0;
     uint32_t worldSize = 2;
+    uint32_t m = 16;
+    uint32_t k = 128;
+    uint32_t n = 128;
+    uint32_t topk = 2;
+    uint32_t expertsPerRank = 2;
+    uint32_t maxOutputSize = 8;
+    bool checkGolden = false;
 };
 
 struct StandaloneRuntimeContext {

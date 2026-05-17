@@ -373,6 +373,14 @@ bool InitStandaloneRankRuntime(StandaloneRankRuntime& runtime, const ModeConfig&
     runtime.mode = mode;
     runtime.layout = BuildDefaultWorkspaceLayout();
     runtime.launch = BuildDefaultLaunchConfig();
+    runtime.launch.m = mode.m;
+    runtime.launch.k = mode.k;
+    runtime.launch.n = mode.n;
+    runtime.launch.topk = mode.topk;
+    runtime.launch.expertsPerRank = mode.expertsPerRank;
+    runtime.launch.worldSize = mode.worldSize;
+    runtime.launch.numExpertGroups = mode.expertsPerRank;
+    runtime.launch.maxOutputSize = mode.maxOutputSize;
     runtime.hccl.rank_id = static_cast<int>(mode.localRank);
     runtime.hccl.world_size = static_cast<int>(mode.worldSize);
     runtime.hccl.device_id = static_cast<int>(mode.localRank);

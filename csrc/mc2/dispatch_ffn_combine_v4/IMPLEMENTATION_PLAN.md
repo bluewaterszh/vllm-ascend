@@ -19,7 +19,7 @@ Read this plan in the same order as the redesigned [DESIGN.md](csrc/mc2/dispatch
 2. **File structure and ownership**
    - See where each algorithm responsibility lands in the standalone project.
 3. **Task-by-task execution details**
-   - Use T1-T9 to implement and verify each stage in order.
+   - Use T1-T13 to implement and verify each stage in order.
 
 This matters because the project should not feel like “some files plus some tests.” It should feel like a staged implementation of one fixed MegaMoE algorithm.
 
@@ -35,8 +35,12 @@ The algorithm core and the supporting scaffolding are intentionally separated.
 | dispatch data plane | **T4** | Proves receiver-driven pull and direct landing into expert-major layout |
 | compute main chain | **T5** | Proves `GMM1 -> SwiGLU -> GMM2` under PTO-first business logic |
 | combine + restore | **T6** | Proves producer-driven push back to owner and weighted restore |
-| end-to-end fused correctness | **T7** | Proves the whole chain composes correctly |
-| overlap + perf recording | **T9** | Adds ready-queue/summary scaffolding and stdout perf logs after correctness is stable |
+| end-to-end fused correctness baseline | **T7** | Proves the whole chain composes correctly before true overlap replaces the serial checkpoint |
+| steady-state overlap mainline | **T9** | Replaces host-side stage staging with a real `dispatch(g+1) / compute(g) / combine(g-1)` execution baseline |
+| dispatch→compute scoreboard | **T10** | Adds queue/summary/probe-first readiness so many-to-many arrivals do not collapse back to BSP |
+| task-driven combine return path | **T11** | Replaces the fixed combine micro-example with owner-prefix-backed `CombinePushTask[]` execution and tile-split return traffic |
+| quant/dequant pipeline | **T12** | Restores W8A8 payload/scale sideband and dequant work so communication savings and processing can be overlapped |
+| coarse/fine activation + perf closeout | **T13** | Adds `{8, 4, 2, 1, 1}`-style SwiGLU tail contraction and closes the loop on stdout-only perf semantics |
 
 ### Supporting scaffolding tasks
 
@@ -50,9 +54,24 @@ The algorithm core and the supporting scaffolding are intentionally separated.
 
 When reviewing this plan, mentally trace the MegaMoE chain in this order:
 
-`T3 -> T4 -> T5 -> T6 -> T7 -> T9`
+`T3 -> T4 -> T5 -> T6 -> T7 -> T9 -> T10 -> T11 -> T12 -> T13`
 
 Then check that `T1/T2/T8` only provide scaffolding and do not redefine the algorithm.
+
+## MegaMoE optimization-point checklist
+
+| Optimization point | What it means in v4 | Completion owner | Current progress |
+| --- | --- | --- | --- |
+| O1. routing/quant/count/cumsum prelude + direct expert-major landing | Dispatch no longer lands sparse source-major payload that still needs a post-comm reorder before GMM | **T3 + T4 + T12** | **Partially complete** — routing truth and float landing baseline are in place; quant payload + scale sideband closure is still pending |
+| O2. asymmetric communication direction | Dispatch remains receiver-driven `TGET`, combine remains producer-driven `TPUT`; they must not be forced into one symmetric transport model | **T4 + T6 + T11** | **Partially complete** — direction choice is fixed in MVP, but combine is still a fixed micro-example rather than a task-driven owner-return path |
+| O3. expert/group steady-state overlap | `dispatch(g+1) / compute(g) / combine(g-1)` must become the actual `full-chain` mainline instead of a host-serialized checkpoint | **T9** | **Not complete** |
+| O4. dispatch→compute soft sync / scoreboard | Replace coarse `SyncAll`-style thinking with queue + summary + controller-owned progress so many-to-many arrivals can advance safely | **T10** | **Not complete** |
+| O5. GMM→combine tile-split return traffic | Return traffic should be consumable at tile/group granularity, not only as a fixed expert or rank micro-sample | **T11** | **Not complete** |
+| O6. W8A8/W4A8-style quantized three-stage pipeline | Routing quant, per-token scale sideband, dequant/requant work, and communication/computation overlap must be treated as one pipeline, not as isolated helpers | **T12** | **Not complete** |
+| O7. coarse-to-fine SwiGLU scheduling | Early groups can stay coarse, tail groups contract toward patterns like `{8, 4, 2, 1, 1}` so activation work does not block combine | **T13** | **Not complete** |
+| O8. small-vs-large shape performance interpretation | The project must explain where front-synchronization cost dominates and where overlap starts to win, using stdout-only metrics | **T13** | **Not complete** |
+
+A MegaMoE optimization point is only considered complete when it is present in the device mainline, covered by correctness checks or explicit behavioral checks, and reflected in stdout-only perf semantics when the point is performance-related.
 
 ---
 
@@ -1688,111 +1707,447 @@ git add csrc/mc2/dispatch_ffn_combine_v4/main.cpp \
 
 ---
 
-## Task 9: Add Phase-6 overlap scaffolding, coarse/fine grouping, and perf recording without re-architecting
+## Task 9: Replace the serial `full-chain` checkpoint with a real steady-state overlap baseline
 
 **Files:**
-- Create: `csrc/mc2/dispatch_ffn_combine_v4/op_kernel/protocol/ready_queue.hpp`
+- Modify: `csrc/mc2/dispatch_ffn_combine_v4/main.cpp`
+- Modify: `csrc/mc2/dispatch_ffn_combine_v4/kernel_launch.hpp`
+- Modify: `csrc/mc2/dispatch_ffn_combine_v4/op_kernel/dispatch_ffn_combine_tiling.h`
+- Modify: `csrc/mc2/dispatch_ffn_combine_v4/op_kernel/dispatch_ffn_combine.cpp`
+- Modify: `csrc/mc2/dispatch_ffn_combine_v4/op_kernel/dispatch_ffn_combine.h`
+- Modify: `csrc/mc2/dispatch_ffn_combine_v4/op_kernel/protocol/ready_queue.hpp`
 - Modify: `csrc/mc2/dispatch_ffn_combine_v4/op_kernel/dispatch/dispatch_progress.hpp`
 - Modify: `csrc/mc2/dispatch_ffn_combine_v4/op_kernel/combine/combine_progress.hpp`
-- Modify: `csrc/mc2/dispatch_ffn_combine_v4/tiling_builder.hpp`
-- Modify: `csrc/mc2/dispatch_ffn_combine_v4/data_utils.cpp`
-- Modify: `csrc/mc2/dispatch_ffn_combine_v4/main.cpp`
+- Modify: `csrc/mc2/dispatch_ffn_combine_v4/case_io.hpp`
+- Modify: `csrc/mc2/dispatch_ffn_combine_v4/case_io.cpp`
 
-- [ ] **Step 1: Add a failing ready-queue test in a fast host target**
-
-```cpp
-mc2::v4::protocol::ReadyQueue queue{};
-queue.Push(0, 3);
-auto item = queue.Pop();
-assert(item.groupId == 0 && item.epoch == 3);
-```
-
-- [ ] **Step 2: Implement the minimal queue, summary-counter, and coarse/fine schedule structs**
+- [ ] **Step 1: Add a failing host-side overlap schedule test that proves `full-chain` is no longer allowed to be host-serialized**
 
 ```cpp
-// csrc/mc2/dispatch_ffn_combine_v4/op_kernel/protocol/ready_queue.hpp
-#pragma once
-#include <queue>
-#include <vector>
-
-namespace mc2::v4::protocol {
-
-struct ReadyItem { uint32_t groupId = 0; uint32_t epoch = 0; };
-
-struct ReadyQueue {
-    std::queue<ReadyItem> q;
-    void Push(uint32_t groupId, uint32_t epoch) { q.push({groupId, epoch}); }
-    ReadyItem Pop() { auto x = q.front(); q.pop(); return x; }
-};
-
-struct ExpertGroupSchedule {
-    std::vector<uint32_t> widths{8, 4, 2, 1, 1};
-};
-
-}  // namespace mc2::v4::protocol
+const auto timeline = mc2::v4::BuildSteadyStateTimeline(/*groupCount=*/3);
+assert(timeline.size() == 5);
+assert(timeline[0] == std::vector<mc2::v4::OverlapStep>{{mc2::v4::OverlapStage::Dispatch, 0}});
+assert(timeline[2] == std::vector<mc2::v4::OverlapStep>{{mc2::v4::OverlapStage::Dispatch, 2},
+                                                         {mc2::v4::OverlapStage::Compute, 1},
+                                                         {mc2::v4::OverlapStage::Combine, 0}});
 ```
 
-- [ ] **Step 3: Extend progress structs to record summary counters**
-
-```cpp
-struct DispatchGroupProgress {
-    uint32_t groupId = 0;
-    uint32_t completedTasks = 0;
-    uint32_t publishedEpoch = 0;
-    uint32_t summaryCount = 0;
-};
-```
-
-- [ ] **Step 4: Add stable stdout perf-report formatting without changing correctness flow**
-
-```cpp
-// in data_utils.cpp
-struct PerfReport {
-    double kernelUsAvg = 0.0;
-    double kernelUsMin = 0.0;
-    double kernelUsMax = 0.0;
-    double e2eUsAvg = 0.0;
-    double e2eUsMin = 0.0;
-    double e2eUsMax = 0.0;
-    double inputTokensPerSec = 0.0;
-    double routedTokensPerSec = 0.0;
-    double equivalentTflops = 0.0;
-    double equivalentGbps = 0.0;
-};
-
-void PrintPerfReport(const PerfReport& r) {
-    std::cout << "perf kernel_us_avg=" << r.kernelUsAvg
-              << " kernel_us_min=" << r.kernelUsMin
-              << " kernel_us_max=" << r.kernelUsMax
-              << " e2e_us_avg=" << r.e2eUsAvg
-              << " e2e_us_min=" << r.e2eUsMin
-              << " e2e_us_max=" << r.e2eUsMax << "\n";
-    std::cout << "perf input_tokens_per_sec=" << r.inputTokensPerSec
-              << " routed_tokens_per_sec=" << r.routedTokensPerSec
-              << " equivalent_tflops=" << r.equivalentTflops
-              << " equivalent_gbps=" << r.equivalentGbps << "\n";
-}
-```
-
-- [ ] **Step 5: Re-run small and large cases and only record metrics**
+- [ ] **Step 2: Run the new test and capture the failure while `full-chain` still launches dispatch / compute / combine as three host stages**
 
 Run:
 
 ```bash
-bash csrc/mc2/dispatch_ffn_combine_v4/run.sh --soc ascend910_93 --world-size 2 --mode full-chain --m 16 --k 128 --n 128 --topk 2 --experts 2
-bash csrc/mc2/dispatch_ffn_combine_v4/run.sh --soc ascend910_93 --world-size 2 --mode full-chain --m 4097 --k 128 --n 128 --topk 2 --experts 2
+cmake --build csrc/mc2/dispatch_ffn_combine_v4/build --target test_task_materialization -j16
+./csrc/mc2/dispatch_ffn_combine_v4/build/test_task_materialization
 ```
 
-Expected: both ranks PASS; logs include stable `perf key=value` lines for timing and workload-derived metrics.
+Expected: FAIL until the overlap timeline builder and real overlapped `full-chain` mode exist.
+
+- [ ] **Step 3: Introduce explicit overlap-mode contracts and make them first-class kernel inputs**
+
+```cpp
+// csrc/mc2/dispatch_ffn_combine_v4/op_kernel/dispatch_ffn_combine_tiling.h
+enum class OverlapStage : uint32_t { Dispatch = 0, Compute = 1, Combine = 2 };
+
+struct OverlapStep {
+    OverlapStage stage = OverlapStage::Dispatch;
+    uint32_t groupId = 0;
+};
+
+struct FullChainOverlapParams {
+    uint64_t dispatchTasks = 0;
+    uint64_t combineTasks = 0;
+    uint64_t queueState = 0;
+    uint64_t progressState = 0;
+    uint32_t groupCount = 0;
+    uint32_t reserved = 0;
+};
+```
+
+- [ ] **Step 4: Replace `full-chain` mode with a real overlapped launch surface instead of reusing three serial host checkpoints**
+
+```cpp
+// in main.cpp
+if (cfg.mode == "full-chain") {
+    const auto expected = mc2::v4::BuildHostFullChainOracle(cfg, runtime.rank);
+    const auto result = mc2::v4::LaunchFullChainOverlap(runtime, expected.plan, cfg);
+    const bool pass = mc2::v4::CompareFloats(result.output, expected.output);
+    std::cout << (pass ? "PASS\n" : "FAIL\n");
+    return pass ? 0 : 1;
+}
+```
+
+```cpp
+// in kernel_launch.hpp
+ModeRunResult LaunchFullChainOverlap(mc2::v4::RuntimeContext& runtime,
+                                     const mc2::v4::routing::RoutingPlanBundle& plan,
+                                     const CaseConfig& cfg);
+```
+
+- [ ] **Step 5: Verify that the real `full-chain` mode now follows the steady-state order `dispatch(g+1) / compute(g) / combine(g-1)` on small and large cases**
+
+Run:
+
+```bash
+bash csrc/mc2/dispatch_ffn_combine_v4/run.sh --soc ascend910_93 --world-size 2 --mode full-chain --m 16 --k 128 --n 128 --topk 2 --experts 2 --check-golden
+bash csrc/mc2/dispatch_ffn_combine_v4/run.sh --soc ascend910_93 --world-size 2 --mode full-chain --m 4097 --k 128 --n 128 --topk 2 --experts 2 --check-golden
+```
+
+Expected: both runs PASS; stdout can explain group-level overlap order instead of only printing three serial stage timings.
+
+- [ ] **Step 6: Suggested commit boundary**
+
+```bash
+git add csrc/mc2/dispatch_ffn_combine_v4/main.cpp \
+        csrc/mc2/dispatch_ffn_combine_v4/kernel_launch.hpp \
+        csrc/mc2/dispatch_ffn_combine_v4/op_kernel/dispatch_ffn_combine_tiling.h \
+        csrc/mc2/dispatch_ffn_combine_v4/op_kernel/dispatch_ffn_combine.cpp \
+        csrc/mc2/dispatch_ffn_combine_v4/op_kernel/dispatch_ffn_combine.h \
+        csrc/mc2/dispatch_ffn_combine_v4/op_kernel/protocol/ready_queue.hpp \
+        csrc/mc2/dispatch_ffn_combine_v4/op_kernel/dispatch/dispatch_progress.hpp \
+        csrc/mc2/dispatch_ffn_combine_v4/op_kernel/combine/combine_progress.hpp \
+        csrc/mc2/dispatch_ffn_combine_v4/case_io.hpp \
+        csrc/mc2/dispatch_ffn_combine_v4/case_io.cpp
+```
+
+---
+
+## Task 10: Build the dispatch→compute scoreboard, summary counters, and probe-first readiness path
+
+**Files:**
+- Modify: `csrc/mc2/dispatch_ffn_combine_v4/op_kernel/protocol/ready_queue.hpp`
+- Modify: `csrc/mc2/dispatch_ffn_combine_v4/op_kernel/dispatch/dispatch_progress.hpp`
+- Modify: `csrc/mc2/dispatch_ffn_combine_v4/op_kernel/protocol/signal_protocol.hpp`
+- Modify: `csrc/mc2/dispatch_ffn_combine_v4/op_kernel/protocol/task_plan.hpp`
+- Modify: `csrc/mc2/dispatch_ffn_combine_v4/op_kernel/dispatch/dispatch_pull.hpp`
+- Modify: `csrc/mc2/dispatch_ffn_combine_v4/main.cpp`
+- Modify: `csrc/mc2/dispatch_ffn_combine_v4/tests/test_task_materialization.cpp`
+
+- [ ] **Step 1: Add a failing host test for many-to-many readiness that requires summary completion before compute can consume a group**
+
+```cpp
+mc2::v4::protocol::DispatchGroupProgress progress{};
+progress.expectedSourceCount = 3;
+progress.completedSourceCount = 2;
+assert(!mc2::v4::protocol::CanLaunchCompute(progress));
+progress.completedSourceCount = 3;
+assert(mc2::v4::protocol::CanLaunchCompute(progress));
+```
+
+- [ ] **Step 2: Implement queue, summary, and scoreboard structs that track group readiness instead of only raw task counters**
+
+```cpp
+struct ReadyQueueEntry {
+    uint32_t groupId = 0;
+    uint32_t readyEpoch = 0;
+    uint32_t expectedSourceCount = 0;
+    uint32_t completedSourceCount = 0;
+};
+
+struct DispatchGroupProgress {
+    uint32_t groupId = 0;
+    uint32_t publishedEpoch = 0;
+    uint32_t expectedSourceCount = 0;
+    uint32_t completedSourceCount = 0;
+    uint32_t summaryCount = 0;
+};
+
+struct DispatchSummaryView {
+    uint32_t minReadyEpoch = 0;
+    uint32_t visibleSourceCount = 0;
+};
+```
+
+Controller ownership rule:
+- one controller-style AIV lane (or equivalent owner block) is responsible for merging producer progress into `DispatchSummaryView`
+- worker AIV lanes only probe the merged summary view; they do **not** each poll every producer/source flag directly
+
+- [ ] **Step 3: Change the hot-path wait policy from pure blocking wait to `TTEST` probe-first with `TWAIT` fallback**
+
+```cpp
+if (!pto::comm::TTEST(srcReady, task.readyEpoch, pto::comm::WaitCmp::GE)) {
+    pto::comm::TWAIT(srcReady, task.readyEpoch, pto::comm::WaitCmp::GE);
+}
+RunDispatchPullTask(...);
+PublishDispatchSummary(groupProgress, task.srcRank);
+```
+
+- [ ] **Step 4: Gate compute launch on per-group summary readiness rather than a host-side stage barrier**
+
+```cpp
+if (mc2::v4::protocol::CanLaunchCompute(groupProgress, summaryView)) {
+    queue.PushComputeReady(groupId, groupProgress.publishedEpoch);
+}
+```
+
+Completion rule:
+- `full-chain` may not depend on a coarse host-side `dispatch stage complete` barrier
+- worker lanes may not regress to per-producer polling once the controller summary path exists
+
+- [ ] **Step 5: Re-run dispatch-only and full-chain on a skewed multi-group case that proves the fast group can advance without waiting for the slowest unrelated group**
+
+Run:
+
+```bash
+bash csrc/mc2/dispatch_ffn_combine_v4/run.sh --soc ascend910_93 --world-size 2 --mode dispatch-only --m 4097 --k 128 --n 128 --topk 2 --experts 2 --check-golden
+bash csrc/mc2/dispatch_ffn_combine_v4/run.sh --soc ascend910_93 --world-size 2 --mode full-chain --m 4097 --k 128 --n 128 --topk 2 --experts 2 --check-golden
+```
+
+Expected: both runs PASS; logs or debug counters can show group-level progress without a global dispatch-done prerequisite.
 
 - [ ] **Step 6: Suggested commit boundary**
 
 ```bash
 git add csrc/mc2/dispatch_ffn_combine_v4/op_kernel/protocol/ready_queue.hpp \
         csrc/mc2/dispatch_ffn_combine_v4/op_kernel/dispatch/dispatch_progress.hpp \
+        csrc/mc2/dispatch_ffn_combine_v4/op_kernel/protocol/signal_protocol.hpp \
+        csrc/mc2/dispatch_ffn_combine_v4/op_kernel/protocol/task_plan.hpp \
+        csrc/mc2/dispatch_ffn_combine_v4/op_kernel/dispatch/dispatch_pull.hpp \
+        csrc/mc2/dispatch_ffn_combine_v4/main.cpp \
+        csrc/mc2/dispatch_ffn_combine_v4/tests/test_task_materialization.cpp
+```
+
+---
+
+## Task 11: Replace the fixed combine micro-example with task-driven owner-prefix and tile-split return traffic
+
+**Files:**
+- Modify: `csrc/mc2/dispatch_ffn_combine_v4/op_kernel/protocol/task_plan.hpp`
+- Modify: `csrc/mc2/dispatch_ffn_combine_v4/op_kernel/routing/route_plan.hpp`
+- Modify: `csrc/mc2/dispatch_ffn_combine_v4/op_kernel/combine/combine_progress.hpp`
+- Modify: `csrc/mc2/dispatch_ffn_combine_v4/op_kernel/combine/combine_push.hpp`
+- Modify: `csrc/mc2/dispatch_ffn_combine_v4/op_kernel/output/unpermute_reduce.hpp`
+- Modify: `csrc/mc2/dispatch_ffn_combine_v4/case_io.hpp`
+- Modify: `csrc/mc2/dispatch_ffn_combine_v4/case_io.cpp`
+- Modify: `csrc/mc2/dispatch_ffn_combine_v4/tests/test_task_materialization.cpp`
+
+- [ ] **Step 1: Add a failing oracle test that requires `CombinePushTask[]` to be owner-prefix-backed and no longer hard-code a single two-rank payload**
+
+```cpp
+const auto plan = mc2::v4::routing::BuildRoutePlanForRank(fixture, 0);
+assert(plan.combineTasks.size() > 1);
+assert(plan.combineTasks[0].dstPayloadOffsetBytes != plan.combineTasks[1].dstPayloadOffsetBytes);
+assert(plan.view.combine.rowToExpandedRange[0].second > plan.view.combine.rowToExpandedRange[0].first);
+```
+
+- [ ] **Step 2: Extend task materialization so combine tasks carry owner-prefix and tile identity explicitly**
+
+```cpp
+struct CombinePushTask {
+    uint32_t dstRank = 0;
+    uint32_t ownerRow = 0;
+    uint32_t groupId = 0;
+    uint32_t tileId = 0;
+    uint64_t srcPayloadOffsetBytes = 0;
+    uint64_t dstPayloadOffsetBytes = 0;
+    uint32_t rowCount = 0;
+    uint32_t completionEpoch = 0;
+};
+```
+
+- [ ] **Step 3: Replace the current fixed `TPUT` sample with a loop over real `CombinePushTask[]`, and publish owner-local ready state per tile or group**
+
+```cpp
+for (uint32_t i = 0; i < tiling->combineTaskCount; ++i) {
+    const auto& task = combineTasks[i];
+    RunCombinePushTask(task, dstReady, localGmm2Out, remoteCombineRegion, cols);
+    PublishCombineSummary(task.groupId, task.tileId, task.completionEpoch);
+}
+```
+
+- [ ] **Step 4: Make output restore consume owner-prefix truth and the materialized surviving expanded range instead of a fixed weighted sample**
+
+```cpp
+RunOutputRestoreGroup(plan.view.combine.rowToExpandedRange,
+                      plan.view.combine.expandedProb,
+                      combineRegion,
+                      restoredRows);
+```
+
+- [ ] **Step 5: Re-run `combine-only` and `full-chain` on a case with multiple surviving contributions per row and verify the fixed two-rank sample path is gone from the mainline**
+
+Run:
+
+```bash
+cmake --build csrc/mc2/dispatch_ffn_combine_v4/build --target test_task_materialization -j16
+./csrc/mc2/dispatch_ffn_combine_v4/build/test_task_materialization
+bash csrc/mc2/dispatch_ffn_combine_v4/run.sh --soc ascend910_93 --world-size 2 --mode combine-only --m 16 --k 128 --n 128 --topk 2 --experts 2 --check-golden
+bash csrc/mc2/dispatch_ffn_combine_v4/run.sh --soc ascend910_93 --world-size 2 --mode full-chain --m 16 --k 128 --n 128 --topk 2 --experts 2 --check-golden
+```
+
+Expected: all checks PASS; combine no longer depends on the fixed `2.0/4.0 -> 3.5` micro-example as the execution path.
+
+- [ ] **Step 6: Suggested commit boundary**
+
+```bash
+git add csrc/mc2/dispatch_ffn_combine_v4/op_kernel/protocol/task_plan.hpp \
+        csrc/mc2/dispatch_ffn_combine_v4/op_kernel/routing/route_plan.hpp \
         csrc/mc2/dispatch_ffn_combine_v4/op_kernel/combine/combine_progress.hpp \
+        csrc/mc2/dispatch_ffn_combine_v4/op_kernel/combine/combine_push.hpp \
+        csrc/mc2/dispatch_ffn_combine_v4/op_kernel/output/unpermute_reduce.hpp \
+        csrc/mc2/dispatch_ffn_combine_v4/case_io.hpp \
+        csrc/mc2/dispatch_ffn_combine_v4/case_io.cpp \
+        csrc/mc2/dispatch_ffn_combine_v4/tests/test_task_materialization.cpp
+```
+
+---
+
+## Task 12: Restore the W8A8 quant/dequant pipeline and leave a clean follow-on boundary for W4A8
+
+**Files:**
+- Modify: `csrc/mc2/dispatch_ffn_combine_v4/case_io.hpp`
+- Modify: `csrc/mc2/dispatch_ffn_combine_v4/case_io.cpp`
+- Modify: `csrc/mc2/dispatch_ffn_combine_v4/tiling_builder.hpp`
+- Modify: `csrc/mc2/dispatch_ffn_combine_v4/tiling_builder.cpp`
+- Modify: `csrc/mc2/dispatch_ffn_combine_v4/op_kernel/dispatch/dispatch_pull.hpp`
+- Modify: `csrc/mc2/dispatch_ffn_combine_v4/op_kernel/compute/gmm1.hpp`
+- Modify: `csrc/mc2/dispatch_ffn_combine_v4/op_kernel/compute/swiglu.hpp`
+- Modify: `csrc/mc2/dispatch_ffn_combine_v4/op_kernel/compute/gmm2.hpp`
+- Modify: `csrc/mc2/dispatch_ffn_combine_v4/op_kernel/substrate/pto_mmad_shell.hpp`
+- Modify: `csrc/mc2/dispatch_ffn_combine_v4/data_utils.cpp`
+
+- [ ] **Step 1: Add a failing oracle case that includes packed INT8 payload and per-token scale sideband rather than only float micro-data**
+
+```cpp
+auto oracle = mc2::v4::BuildHostComputeOracle(/*quantized=*/true);
+assert(!oracle.quantPayload.empty());
+assert(!oracle.scale1.empty());
+assert(!oracle.scale2.empty());
+```
+
+- [ ] **Step 2: Extend routing publication and workspace layout so W8A8 payload and scale sideband travel as first-class executable truth**
+
+```cpp
+struct QuantSidebandView {
+    uint64_t payloadOffsetBytes = 0;
+    uint64_t scale1OffsetBytes = 0;
+    uint64_t scale2OffsetBytes = 0;
+    uint32_t slotCount = 2;
+};
+```
+
+Buffering rule:
+- payload / scale sideband staging must reserve at least two rotating slots so communication and dequant-side consumption can overlap
+- the plan may simplify tile shapes, but it may not collapse back to a single shared staging slot that serializes quant-side work
+
+- [ ] **Step 3: Restore compute-side dequant / requant contracts around `GMM1 -> SwiGLU -> GMM2`, and keep host code oracle-only**
+
+```cpp
+RunGmm1Group(int8Input, weight1, gmm1Acc, scale1);
+RunSwiGluGroup(gmm1Acc, swigluTmp[slotId], scale1, scale2);
+RunGmm2Group(swigluTmp[slotId], weight2, gmm2Out, scale2);
+```
+
+Pipeline rule:
+- dequant / SwiGLU / requant must be expressible on rotating staging slots (`slotId = step % 2`) so those phases can hide behind communication or neighboring compute
+- if a first implementation only closes W8A8, it still must preserve this two-slot contract instead of baking in a permanently serial post-processing path
+
+- [ ] **Step 4: Make stdout perf distinguish routed payload bytes from quant sideband bytes so W8A8 savings and overheads are visible together**
+
+```cpp
+PrintPerfRecord({"full-chain", "dispatch-quant", rank, elapsedMs,
+                 routedPayloadBytes + scaleSidebandBytes,
+                 routedTokenCount});
+```
+
+- [ ] **Step 5: Re-run small and large `full-chain` cases in quantized mode, and explicitly document whether W4A8 can reuse the same contracts or needs a separate substrate milestone**
+
+Run:
+
+```bash
+bash csrc/mc2/dispatch_ffn_combine_v4/run.sh --soc ascend910_93 --world-size 2 --mode full-chain --m 16 --k 128 --n 128 --topk 2 --experts 2 --check-golden
+bash csrc/mc2/dispatch_ffn_combine_v4/run.sh --soc ascend910_93 --world-size 2 --mode full-chain --m 4097 --k 128 --n 128 --topk 2 --experts 2 --check-golden
+```
+
+Expected: both runs PASS with quant-aware oracle compare; stdout can report payload vs scale traffic. If W4A8 cannot yet be expressed with the same PTO/substrate surface, that gap is written down explicitly instead of being hidden behind the W8A8 path.
+
+- [ ] **Step 6: Suggested commit boundary**
+
+```bash
+git add csrc/mc2/dispatch_ffn_combine_v4/case_io.hpp \
+        csrc/mc2/dispatch_ffn_combine_v4/case_io.cpp \
+        csrc/mc2/dispatch_ffn_combine_v4/tiling_builder.hpp \
+        csrc/mc2/dispatch_ffn_combine_v4/tiling_builder.cpp \
+        csrc/mc2/dispatch_ffn_combine_v4/op_kernel/dispatch/dispatch_pull.hpp \
+        csrc/mc2/dispatch_ffn_combine_v4/op_kernel/compute/gmm1.hpp \
+        csrc/mc2/dispatch_ffn_combine_v4/op_kernel/compute/swiglu.hpp \
+        csrc/mc2/dispatch_ffn_combine_v4/op_kernel/compute/gmm2.hpp \
+        csrc/mc2/dispatch_ffn_combine_v4/op_kernel/substrate/pto_mmad_shell.hpp \
+        csrc/mc2/dispatch_ffn_combine_v4/data_utils.cpp
+```
+
+---
+
+## Task 13: Add coarse-to-fine SwiGLU scheduling and finalize stdout-only MegaMoE perf characterization
+
+**Files:**
+- Modify: `csrc/mc2/dispatch_ffn_combine_v4/op_kernel/protocol/ready_queue.hpp`
+- Modify: `csrc/mc2/dispatch_ffn_combine_v4/op_kernel/compute/epilogue.hpp`
+- Modify: `csrc/mc2/dispatch_ffn_combine_v4/op_kernel/compute/swiglu.hpp`
+- Modify: `csrc/mc2/dispatch_ffn_combine_v4/main.cpp`
+- Modify: `csrc/mc2/dispatch_ffn_combine_v4/data_utils.hpp`
+- Modify: `csrc/mc2/dispatch_ffn_combine_v4/data_utils.cpp`
+- Modify: `csrc/mc2/dispatch_ffn_combine_v4/run.sh`
+
+- [ ] **Step 1: Add a failing host schedule test for coarse-to-fine expert grouping, using a reference pattern like `{8, 4, 2, 1, 1}`**
+
+```cpp
+const auto widths = mc2::v4::BuildExpertGroupSchedule(/*experts=*/16);
+assert(widths == std::vector<uint32_t>({8, 4, 2, 1, 1}));
+```
+
+- [ ] **Step 2: Implement coarse/fine schedule helpers and make the tail of the activation path contractible without changing metadata truth**
+
+```cpp
+struct ExpertGroupSchedule {
+    std::vector<uint32_t> widths;
+    uint32_t WidthForStep(uint32_t step) const;
+};
+```
+
+- [ ] **Step 3: Apply the schedule to the activation and post-processing path so SwiGLU can run coarse early and finer near the tail without blocking combine**
+
+```cpp
+for (uint32_t step = 0; step < schedule.widths.size(); ++step) {
+    const uint32_t width = schedule.WidthForStep(step);
+    RunSwiGluGroupRange(groupBase, width, ...);
+    PublishComputeReady(groupBase, width, epoch);
+}
+```
+
+- [ ] **Step 4: Expand stdout-only perf reporting so it can explain overlap instead of only listing stage times**
+
+```cpp
+PrintPerfRecord({"full-chain", "overlap-summary", rank, e2eMs,
+                 routedBytes,
+                 routedTokens,
+                 /*extra fields encoded in key=value suffixes:*/
+                 scheduleTag,
+                 overlapGroupCount,
+                 quantSidebandBytes});
+```
+
+- [ ] **Step 5: Re-run small and large full-chain cases and record the expected trade-off: small shape may still lose to front-synchronization cost, while large shape should expose the overlap path**
+
+Run:
+
+```bash
+bash csrc/mc2/dispatch_ffn_combine_v4/run.sh --soc ascend910_93 --world-size 2 --mode full-chain --m 16 --k 128 --n 128 --topk 2 --experts 2 --check-golden
+bash csrc/mc2/dispatch_ffn_combine_v4/run.sh --soc ascend910_93 --world-size 2 --mode full-chain --m 4097 --k 128 --n 128 --topk 2 --experts 2 --check-golden
+```
+
+Expected: both runs PASS; stdout includes enough key=value fields to explain schedule width, routed tokens, routed bytes, sideband bytes, and overlap-sensitive timing. The documentation can then honestly state where MegaMoE wins and where front-synchronization cost still dominates.
+
+- [ ] **Step 6: Suggested commit boundary**
+
+```bash
+git add csrc/mc2/dispatch_ffn_combine_v4/op_kernel/protocol/ready_queue.hpp \
+        csrc/mc2/dispatch_ffn_combine_v4/op_kernel/compute/epilogue.hpp \
+        csrc/mc2/dispatch_ffn_combine_v4/op_kernel/compute/swiglu.hpp \
+        csrc/mc2/dispatch_ffn_combine_v4/main.cpp \
+        csrc/mc2/dispatch_ffn_combine_v4/data_utils.hpp \
         csrc/mc2/dispatch_ffn_combine_v4/data_utils.cpp \
-        csrc/mc2/dispatch_ffn_combine_v4/main.cpp
+        csrc/mc2/dispatch_ffn_combine_v4/run.sh
 ```
 
 ---
@@ -1805,7 +2160,11 @@ git add csrc/mc2/dispatch_ffn_combine_v4/op_kernel/protocol/ready_queue.hpp \
 - **Phase 3 complete** when `test_compute_reference` passes and device-backed `compute-only` matches the host compute oracle.
 - **Phase 4 complete** when real two-rank `combine-only` exits 0 and restored rows match the host combine oracle.
 - **Phase 5 complete** when real two-rank `full-chain` passes on both small and large cases with host oracle comparison enabled.
-- **Phase 6 complete** when small and large multi-rank runs PASS with perf logs emitted and queue/summary scaffolding present, while host reference remains oracle-only.
+- **Phase 6 complete** when `full-chain` is no longer a host-serialized dispatch/compute/combine checkpoint and small/large cases PASS under a real overlapped execution baseline.
+- **Phase 7 complete** when dispatch→compute readiness is driven by queue/summary/scoreboard state with `TTEST` probe-first behavior, not by a coarse host-side stage barrier.
+- **Phase 8 complete** when combine is driven by real `CombinePushTask[]` + owner-prefix truth + tile/group completion, and the fixed micro-example path is gone from the mainline.
+- **Phase 9 complete** when the W8A8 payload/scale/dequant path is in the device mainline, stdout perf distinguishes routed payload from sideband traffic, and any W4A8 gap is explicitly called out.
+- **Phase 10 complete** when coarse/fine SwiGLU scheduling and stdout-only perf characterization are both in place, with small/large shape trade-offs explained without reintroducing serial fallbacks.
 
 ---
 
@@ -1816,8 +2175,8 @@ git add csrc/mc2/dispatch_ffn_combine_v4/op_kernel/protocol/ready_queue.hpp \
 - Protocol sequencing and signal rules: covered by Tasks 2, 4, 6, and 8.
 - Routing planner truth and task materialization: covered by Task 3.
 - Dispatch / compute / combine / restore chain on the real device-backed mainline: covered by Tasks 4-7.
-- Overlap/perf recording: covered by Task 9.
-- Standalone-only / PTO-first / thin substrate rules: enforced across file ownership and Tasks 4-8, with host reference retained only as oracle.
+- Steady-state overlap / scoreboard / combine-return / quant pipeline / perf closeout: covered by Tasks 9-13.
+- Standalone-only / PTO-first / thin substrate rules: enforced across file ownership and Tasks 4-13, with host reference retained only as oracle.
 
 ### Placeholder scan
 - 没有保留占位段、空指令或未展开步骤。

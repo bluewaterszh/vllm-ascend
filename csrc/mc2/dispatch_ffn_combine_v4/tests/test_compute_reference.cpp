@@ -7,6 +7,9 @@
 int main()
 {
     const auto oracle = mc2::v4::BuildHostComputeOracle();
+    assert(!oracle.quantPayload.empty());
+    assert(!oracle.scale1.empty());
+    assert(!oracle.scale2.empty());
     assert(oracle.gmm1Out.size() == 4);
     assert(oracle.swigluOut.size() == 2);
     assert(oracle.gmm2Out.size() == 2);

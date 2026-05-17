@@ -12,6 +12,7 @@ struct PerfRecord {
     double elapsedMs = 0.0;
     uint64_t bytes = 0;
     uint32_t items = 0;
+    std::string extraKv;
 };
 
 double NowMs();
