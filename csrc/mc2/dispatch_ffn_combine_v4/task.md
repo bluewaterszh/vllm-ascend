@@ -57,6 +57,39 @@
 | O7 | SwiGLU 粗细粒度结合调度 | 已完成 | T13 | 已实现并测试 `{8,4,2,1,1}` schedule policy，large 运行输出 `schedule_tag=8x4x2x1x1` |
 | O8 | small/large shape 的性能口径与 front-sync tradeoff 解释 | 已完成 | T13 | stdout-only perf 已覆盖 per-stage bandwidth、tick/group、summary ready counters、shape class、quant sideband bytes 与 schedule tag |
 
+## 性能基线与下一阶段任务
+
+### 2026-05-17 fresh perf snapshot
+
+| Case | v2 standalone e2e | v4 standalone e2e | 当前差距 | 备注 |
+| --- | ---: | ---: | ---: | --- |
+| small `m=16 k=128 n=128 topk=2 experts=2 world_size=2` | 124.42 us | 16.9492 ms | v4 约慢 136x | v2 为 warmup=3 / measure=5 的 max-rank avg；v4 为当前 single-run `stage=e2e` max-rank |
+| large `m=4097 k=128 n=128 topk=2 experts=2 world_size=2` | 129.86 us | 21.5307 ms | v4 约慢 166x | v2 为真实 large case；v4 当前 large 主要验证参数/schedule/perf 口径，核心 fixture 仍是 two-rank micro fixture |
+
+v2 参考输出：
+- small：kernel avg 30.36 us，e2e avg 124.42 us，e2e eq_compute 0.03 TFLOPS，e2e eq_comm 0.09 GB/s
+- large：kernel avg 40.22 us，e2e avg 129.86 us，e2e eq_compute 6.20 TFLOPS，e2e eq_comm 22.80 GB/s
+
+v4 参考输出：
+- small：rank0 e2e 16.9492 ms，rank1 e2e 16.5937 ms，`schedule_tag=2 shape_class=small`，双 rank PASS
+- large：rank0 e2e 12.0274 ms，rank1 e2e 21.5307 ms，`schedule_tag=8x4x2x1x1 shape_class=large`，双 rank PASS
+
+口径说明：
+- v2 e2e 包含测量循环内的一次 kernel launch、stream sync 与 MPI barrier，并做 warmup/measure 平均；不包含数据生成和最终 accuracy copy。
+- v4 e2e 当前从 overlap timeline 主循环前计时到 final golden compare 前后，仍包含 host-controller 分组调度、多次 kernel launch、HCCL barrier、stream sync、copy-back/check 等 baseline 开销。
+- 因此当前数据说明 v4 功能 baseline 已闭合但性能尚未优化，不能代表最终 PTO/MegaMoE 性能上限。
+
+### 下一阶段性能优化任务
+
+| 编号 | 任务 | 状态 | 目标 | 第一检查点 |
+| --- | --- | --- | --- | --- |
+| POPT1 | 建立 v4 公平 perf harness | 待开始 | 将 v4 改成 v2 类似的 warmup/measure loop、max-rank avg、kernel/e2e 双口径，并保留 stdout-only 输出 | small/large 都能输出 avg/min/max/std，并与当前 single-run e2e 对齐数量级 |
+| POPT2 | 扩展 v4 到真实 large workload 数据路径 | 待开始 | 让 `--m/--k/--n/--topk/--max-output-size` 驱动真实 routing/dispatch/compute/combine 数据量，而不是只改变 schedule/perf 标签 | v4 large 的 bytes/items/token 数与 v2 case 口径可对应 |
+| POPT3 | 压缩 host-controller overlap 开销 | 待开始 | 减少 per-group host memcpy、kernel launch、barrier、stream sync，把 scoreboard/summary 下沉到更接近 device/controller 的执行面 | `stage=e2e` 从 ms 级降到 sub-ms 级 |
+| POPT4 | 优化 combine return path | 待开始 | 从当前 group task 子集 + 全局 8-float transport slot baseline，推进到更细 tile split / 更少冗余 staging / 更少 restore launch | combine 阶段 tick 总开销下降，rank 间 e2e 不再由慢 rank 放大到 20ms+ |
+| POPT5 | 优化 compute substrate 和量化路径 | 待开始 | 将当前 micro GMM/dequant shell 扩展并替换为更接近 v2/MegaMoE 的真实 device compute pipeline | large case eq_compute 指标开始接近 v2 数量级 |
+| POPT6 | 建立性能回归记录 | 待开始 | 每轮优化记录 v2 baseline、v4 e2e/kernel、shape、commit、关键 stdout perf 字段 | task.md 保留最新 perf 表，避免只凭单次输出判断 |
+
 ## 当前建议 review 顺序
 
 | 顺序 | 动作 | 状态 |
