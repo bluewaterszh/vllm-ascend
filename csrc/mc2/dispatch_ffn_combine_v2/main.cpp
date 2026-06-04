@@ -1,8 +1,9 @@
 #include <algorithm>
 #include <chrono>
-#include <cmath>
 #include <cstdlib>
+#include <cstdint>
 #include <cstring>
+#include <cmath>
 #include <iomanip>
 #include <iostream>
 #include <numeric>
@@ -26,8 +27,6 @@ namespace {
 
 constexpr int kDefaultWarmupIters = 3;
 constexpr int kDefaultMeasureIters = 5;
-constexpr double kMicrosecondsPerSecond = 1000.0 * 1000.0;
-constexpr double kBytesPerGiB = 1024.0 * 1024.0 * 1024.0;
 
 struct DeviceBuffer {
     void *ptr = nullptr;
@@ -63,9 +62,6 @@ DeviceBuffer MakeDeviceBuffer(size_t bytes, const void *host_src = nullptr)
 {
     DeviceBuffer buffer;
     buffer.bytes = bytes;
-    if (bytes == 0) {
-        return buffer;
-    }
     if (aclrtMalloc(&buffer.ptr, bytes, ACL_MEM_MALLOC_HUGE_FIRST) != ACL_SUCCESS) {
         throw std::runtime_error("aclrtMalloc failed");
     }
@@ -76,14 +72,13 @@ DeviceBuffer MakeDeviceBuffer(size_t bytes, const void *host_src = nullptr)
     return buffer;
 }
 
-std::vector<uint16_t> BytesToU16(const std::vector<uint8_t> &bytes)
+DeviceBuffer MakeTensorList1(void *device_data)
 {
-    if (bytes.size() % sizeof(uint16_t) != 0) {
-        throw std::runtime_error("fp16 file size is not aligned");
-    }
-    std::vector<uint16_t> out(bytes.size() / sizeof(uint16_t));
-    std::memcpy(out.data(), bytes.data(), bytes.size());
-    return out;
+    const uint64_t tensor_list[] = {
+        sizeof(uint64_t),
+        reinterpret_cast<uint64_t>(device_data),
+    };
+    return MakeDeviceBuffer(sizeof(tensor_list), tensor_list);
 }
 
 int ParseEnvInt(const char *name, int default_value)
@@ -97,6 +92,64 @@ int ParseEnvInt(const char *name, int default_value)
     } catch (const std::exception &) {
         throw std::runtime_error(std::string("invalid integer in env: ") + name);
     }
+}
+
+std::string BuildAclError(const char *message, aclError ret)
+{
+    std::ostringstream os;
+    os << message << ", ret=" << ret;
+    const char *recent = aclGetRecentErrMsg();
+    if (recent != nullptr && recent[0] != '\0') {
+        os << ", recent=" << recent;
+    }
+    return os.str();
+}
+
+std::vector<uint16_t> BytesToU16(const std::vector<uint8_t> &bytes)
+{
+    if (bytes.size() % sizeof(uint16_t) != 0) {
+        throw std::runtime_error("fp16 file size is not aligned");
+    }
+    std::vector<uint16_t> out(bytes.size() / sizeof(uint16_t));
+    std::memcpy(out.data(), bytes.data(), bytes.size());
+    return out;
+}
+
+std::string BuildAccuracyReportText(int rank_id, const AccuracyReport &report)
+{
+    std::ostringstream os;
+    os << std::setprecision(6)
+       << "rank=" << rank_id
+       << " max_diff=" << report.max_abs_err
+       << " max_ratio=" << report.max_rel_err
+       << " err=" << report.mismatch_count << "/" << report.total_count
+       << " -> " << (report.pass ? "PASS" : "FAIL");
+    return os.str();
+}
+
+std::string BuildIntVectorText(const std::string &name, const std::vector<int32_t> &values)
+{
+    std::ostringstream os;
+    os << name << "=[";
+    for (size_t i = 0; i < values.size(); ++i) {
+        if (i != 0) {
+            os << ",";
+        }
+        os << values[i];
+    }
+    os << "]";
+    return os.str();
+}
+
+void PrintOrderedByRank(int rank_id, int world_size, const std::string &text)
+{
+    for (int turn = 0; turn < world_size; ++turn) {
+        CommMpiBarrier();
+        if (turn == rank_id) {
+            std::cout << text << std::endl;
+        }
+    }
+    CommMpiBarrier();
 }
 
 bool ZeroWindowMemory(const StandaloneRankRuntime &runtime)
@@ -113,9 +166,6 @@ bool ZeroWindowMemory(const StandaloneRankRuntime &runtime)
 
 void ZeroDeviceBuffer(const DeviceBuffer &buffer, const char *name)
 {
-    if (buffer.bytes == 0) {
-        return;
-    }
     if (aclrtMemset(buffer.ptr, buffer.bytes, 0, buffer.bytes) != ACL_SUCCESS) {
         throw std::runtime_error(std::string("failed to zero ") + name);
     }
@@ -152,21 +202,6 @@ PerfStats CalcStats(const std::vector<double> &samples)
     return stats;
 }
 
-double ToTokensPerSecond(double tokens, double us)
-{
-    return us > 0.0 ? tokens * kMicrosecondsPerSecond / us : 0.0;
-}
-
-double ToTflops(double flops, double us)
-{
-    return us > 0.0 ? flops * kMicrosecondsPerSecond / us / 1e12 : 0.0;
-}
-
-double ToGbs(double bytes, double us)
-{
-    return us > 0.0 ? bytes * kMicrosecondsPerSecond / us / kBytesPerGiB : 0.0;
-}
-
 std::vector<double> GatherMaxSamplesToRoot(const std::vector<double> &local_samples,
                                            int rank_id,
                                            int world_size)
@@ -198,46 +233,7 @@ std::vector<double> GatherMaxSamplesToRoot(const std::vector<double> &local_samp
     return max_samples;
 }
 
-std::string BuildAccuracyReportText(int rank_id, const AccuracyReport &report, double atol, double rtol)
-{
-    std::ostringstream os;
-    os << std::fixed << std::setprecision(6)
-       << "rank=" << rank_id
-       << " compare(total=" << report.total_count
-       << ", mismatch=" << report.mismatch_count
-       << ", nan_or_inf=" << report.nan_or_inf_count
-       << ", max_abs_err=" << report.max_abs_err
-       << ", max_rel_err=" << report.max_rel_err
-       << ", mean_abs_err=" << report.mean_abs_err
-       << ", rmse=" << report.rmse
-       << ", atol=" << atol
-       << ", rtol=" << rtol
-       << ")";
-    if (report.has_first_bad) {
-        os << '\n'
-           << std::fixed << std::setprecision(6)
-           << "rank=" << rank_id
-           << " first_bad(index=" << report.first_bad_index
-           << ", expected=" << report.first_expected
-           << ", actual=" << report.first_actual
-           << ")";
-    }
-    return os.str();
-}
-
-void PrintOrderedByRank(int rank_id, int world_size, const std::string &text)
-{
-    for (int turn = 0; turn < world_size; ++turn) {
-        CommMpiBarrier();
-        if (turn == rank_id) {
-            std::cout << text << std::endl;
-        }
-    }
-    CommMpiBarrier();
-}
-
-void PrintPerfSummary(const CaseConfig &cfg,
-                      int warmup_iters,
+void PrintPerfSummary(int warmup_iters,
                       int measure_iters,
                       const std::vector<double> &kernel_samples_us,
                       const std::vector<double> &e2e_samples_us)
@@ -251,36 +247,15 @@ void PrintPerfSummary(const CaseConfig &cfg,
     std::cout << std::fixed << std::setprecision(2);
     std::cout << "\n===============================================================\n";
     std::cout << "[PROFILE] dispatch_ffn_combine_v2\n";
-    std::cout << "  shape: m=" << cfg.m
-              << " k=" << cfg.k
-              << " n=" << cfg.n
-              << " topk=" << cfg.topk
-              << " expert_per_rank=" << cfg.expert_per_rank
-              << " world_size=" << cfg.world_size << '\n';
-    std::cout << "  iters: warmup=" << warmup_iters
-              << " measure=" << measure_iters << '\n';
-    std::cout << "  logical work(all ranks): input_tokens=" << cfg.input_tokens_all_ranks
-              << " routed_tokens=" << cfg.routed_tokens_all_ranks
-              << " remote_routed_tokens=" << cfg.remote_routed_tokens_all_ranks
-              << " compute_flops=" << cfg.compute_flops_all_ranks
-              << " comm_bytes=" << cfg.comm_bytes_all_ranks << '\n';
+    std::cout << "  iters: warmup=" << warmup_iters << " measure=" << measure_iters << '\n';
     std::cout << "  kernel(max rank per iter): avg=" << kernel_stats.avg << " us"
               << " min=" << kernel_stats.min << " us"
               << " max=" << kernel_stats.max << " us"
               << " std=" << kernel_stats.stddev << " us\n";
-    std::cout << "    input_tokens/s=" << ToTokensPerSecond(cfg.input_tokens_all_ranks, kernel_stats.avg)
-              << " routed_tokens/s=" << ToTokensPerSecond(cfg.routed_tokens_all_ranks, kernel_stats.avg)
-              << " eq_compute=" << ToTflops(cfg.compute_flops_all_ranks, kernel_stats.avg) << " TFLOPS"
-              << " eq_comm=" << ToGbs(cfg.comm_bytes_all_ranks, kernel_stats.avg) << " GB/s\n";
     std::cout << "  e2e(max rank per iter):    avg=" << e2e_stats.avg << " us"
               << " min=" << e2e_stats.min << " us"
               << " max=" << e2e_stats.max << " us"
               << " std=" << e2e_stats.stddev << " us\n";
-    std::cout << "    input_tokens/s=" << ToTokensPerSecond(cfg.input_tokens_all_ranks, e2e_stats.avg)
-              << " routed_tokens/s=" << ToTokensPerSecond(cfg.routed_tokens_all_ranks, e2e_stats.avg)
-              << " eq_compute=" << ToTflops(cfg.compute_flops_all_ranks, e2e_stats.avg) << " TFLOPS"
-              << " eq_comm=" << ToGbs(cfg.comm_bytes_all_ranks, e2e_stats.avg) << " GB/s\n";
-    std::cout << "  note: equivalent compute/comm are derived from case.json logical workload, not hardware counters.\n";
     std::cout << "===============================================================\n" << std::endl;
 }
 
@@ -320,12 +295,31 @@ bool RunOneRank(int rank_id, int world_size, const std::string &case_dir, const 
         DeviceBuffer expert_idx_dev = MakeDeviceBuffer(expert_idx.size(), expert_idx.data());
         DeviceBuffer scale1_dev = MakeDeviceBuffer(scale1.size(), scale1.data());
         DeviceBuffer scale2_dev = MakeDeviceBuffer(scale2.size(), scale2.data());
+        DeviceBuffer weight1_list_dev = MakeTensorList1(weight1_dev.ptr);
+        DeviceBuffer weight2_list_dev = MakeTensorList1(weight2_dev.ptr);
+        DeviceBuffer scale1_list_dev = MakeTensorList1(scale1_dev.ptr);
+        DeviceBuffer scale2_list_dev = MakeTensorList1(scale2_dev.ptr);
         DeviceBuffer probs_dev = MakeDeviceBuffer(probs.size(), probs.data());
         DeviceBuffer x_active_mask_dev = MakeDeviceBuffer(x_active_mask.size(), x_active_mask.data());
         DeviceBuffer out_dev = MakeDeviceBuffer(static_cast<size_t>(cfg.m) * cfg.k * sizeof(uint16_t));
         DeviceBuffer expert_token_nums_dev = MakeDeviceBuffer(static_cast<size_t>(cfg.expert_per_rank) * sizeof(int32_t));
         DeviceBuffer workspace_dev = MakeDeviceBuffer(build.workspace_bytes);
         DeviceBuffer tiling_dev = MakeDeviceBuffer(sizeof(build.tiling), &build.tiling);
+
+        DispatchFFNCombineLaunchArgs args;
+        args.block_dim = build.block_dim;
+        args.tiling = tiling_dev.ptr;
+        args.workspace = workspace_dev.ptr;
+        args.x = x_dev.ptr;
+        args.weight1 = weight1_list_dev.ptr;
+        args.weight2 = weight2_list_dev.ptr;
+        args.expert_idx = expert_idx_dev.ptr;
+        args.scale1 = scale1_list_dev.ptr;
+        args.scale2 = scale2_list_dev.ptr;
+        args.probs = probs_dev.ptr;
+        args.x_active_mask = x_active_mask_dev.ptr;
+        args.out = out_dev.ptr;
+        args.expert_token_nums = expert_token_nums_dev.ptr;
 
         EventHandle kernel_start;
         EventHandle kernel_end;
@@ -336,25 +330,11 @@ bool RunOneRank(int rank_id, int world_size, const std::string &case_dir, const 
             }
         }
 
-        DispatchFFNCombineLaunchArgs args;
-        args.block_dim = build.block_dim;
-        args.tiling = tiling_dev.ptr;
-        args.workspace = workspace_dev.ptr;
-        args.x = x_dev.ptr;
-        args.weight1 = weight1_dev.ptr;
-        args.weight2 = weight2_dev.ptr;
-        args.expert_idx = expert_idx_dev.ptr;
-        args.scale1 = scale1_dev.ptr;
-        args.scale2 = scale2_dev.ptr;
-        args.probs = probs_dev.ptr;
-        args.x_active_mask = x_active_mask_dev.ptr;
-        args.out = out_dev.ptr;
-        args.expert_token_nums = expert_token_nums_dev.ptr;
-
         auto launch_once = [&]() {
             launchDispatchFFNCombine(args, runtime.compute_stream);
-            if (aclrtSynchronizeStream(runtime.compute_stream) != ACL_SUCCESS) {
-                throw std::runtime_error("stream sync failed");
+            aclError sync_ret = aclrtSynchronizeStream(runtime.compute_stream);
+            if (sync_ret != ACL_SUCCESS) {
+                throw std::runtime_error(BuildAclError("stream sync failed", sync_ret));
             }
         };
 
@@ -382,8 +362,9 @@ bool RunOneRank(int rank_id, int world_size, const std::string &case_dir, const 
             if (aclrtRecordEvent(kernel_end.event, runtime.compute_stream) != ACL_SUCCESS) {
                 throw std::runtime_error("failed to record kernel end event");
             }
-            if (aclrtSynchronizeStream(runtime.compute_stream) != ACL_SUCCESS) {
-                throw std::runtime_error("stream sync failed");
+            aclError sync_ret = aclrtSynchronizeStream(runtime.compute_stream);
+            if (sync_ret != ACL_SUCCESS) {
+                throw std::runtime_error(BuildAclError("stream sync failed", sync_ret));
             }
             CommMpiBarrier();
             const auto host_end = std::chrono::high_resolution_clock::now();
@@ -399,7 +380,7 @@ bool RunOneRank(int rank_id, int world_size, const std::string &case_dir, const 
         const std::vector<double> kernel_max_samples = GatherMaxSamplesToRoot(kernel_times_us, rank_id, world_size);
         const std::vector<double> e2e_max_samples = GatherMaxSamplesToRoot(e2e_times_us, rank_id, world_size);
         if (rank_id == 0) {
-            PrintPerfSummary(cfg, warmup_iters, measure_iters, kernel_max_samples, e2e_max_samples);
+            PrintPerfSummary(warmup_iters, measure_iters, kernel_max_samples, e2e_max_samples);
         }
 
         PrepareIterationState(runtime, out_dev, expert_token_nums_dev, workspace_dev);
@@ -412,14 +393,24 @@ bool RunOneRank(int rank_id, int world_size, const std::string &case_dir, const 
                         actual_out.size() * sizeof(uint16_t), ACL_MEMCPY_DEVICE_TO_HOST) != ACL_SUCCESS) {
             throw std::runtime_error("device->host output copy failed");
         }
+        std::vector<int32_t> expert_token_nums(cfg.expert_per_rank);
+        if (aclrtMemcpy(expert_token_nums.data(), expert_token_nums.size() * sizeof(int32_t),
+                        expert_token_nums_dev.ptr, expert_token_nums.size() * sizeof(int32_t),
+                        ACL_MEMCPY_DEVICE_TO_HOST) != ACL_SUCCESS) {
+            throw std::runtime_error("device->host expert_token_nums copy failed");
+        }
 
         WriteBinaryFile(case_dir + "/output_rank" + std::to_string(rank_id) + ".bin",
                         actual_out.data(), actual_out.size() * sizeof(uint16_t));
         const AccuracyReport report = CompareFp16File(expected_out, actual_out, cfg.compare_atol, cfg.compare_rtol);
         ok = report.pass;
-        PrintOrderedByRank(rank_id, world_size,
-                           BuildAccuracyReportText(rank_id, report, cfg.compare_atol, cfg.compare_rtol) + "\n" +
-                           (ok ? "PASS" : "FAIL") + std::string(" rank=") + std::to_string(rank_id));
+        std::string report_text = BuildAccuracyReportText(rank_id, report);
+        if (!ok) {
+            report_text += "\n" + BuildIntVectorText("expert_token_nums", expert_token_nums);
+        }
+        PrintOrderedByRank(rank_id, world_size, report_text + "\n" +
+                                                     (ok ? "PASS" : "FAIL") + std::string(" rank=") +
+                                                         std::to_string(rank_id));
     } catch (const std::exception &ex) {
         std::cerr << "rank=" << rank_id << " error: " << ex.what() << std::endl;
         ok = false;

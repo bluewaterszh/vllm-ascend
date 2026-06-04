@@ -27,8 +27,8 @@ extern "C" __global__ __aicore__ void dispatch_ffn_combine(GM_ADDR x, GM_ADDR w1
     GM_ADDR xActiveMask, GM_ADDR c, GM_ADDR expertTokenNums, GM_ADDR workspaceGM,  GM_ADDR tilingGM)
 {
     REGISTER_TILING_DEFAULT(DispatchFFNCombineTilingData);
-    if (TILING_KEY_IS(1000010)) {
-        KERNEL_TASK_TYPE(1000010, KERNEL_TYPE_MIX_AIC_1_2);
+    if (TILING_KEY_IS(0)) {
+        KERNEL_TASK_TYPE(0, KERNEL_TYPE_MIX_AIC_1_2);
         const __gm__ DispatchFFNCombineTilingData *tilingData =
             reinterpret_cast<__gm__ DispatchFFNCombineTilingData *>(tilingGM);
         DispatchFFNCombine<int8_t, DTYPE_W1, DTYPE_OUT, false, true> op;

@@ -23,7 +23,9 @@ struct AccuracyReport {
     bool pass = false;
     size_t total_count = 0;
     size_t mismatch_count = 0;
+    size_t err_threshold = 0;
     size_t nan_or_inf_count = 0;
+    double min_abs_err = 0.0;
     double max_abs_err = 0.0;
     double max_rel_err = 0.0;
     double mean_abs_err = 0.0;

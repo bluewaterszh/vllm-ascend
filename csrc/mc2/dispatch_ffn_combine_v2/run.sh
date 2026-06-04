@@ -10,10 +10,11 @@ TOPK=2
 EXPERTS=2
 MAX_OUTPUT_SIZE=32
 SEED=20260515
-ATOL=1e-3
+CASE_MODE=cpu-golden
+ATOL=1e-4
 RTOL=1e-3
-WARMUP_ITERS=3
-MEASURE_ITERS=5
+WARMUP_ITERS=${DISPATCH_FFN_COMBINE_V2_WARMUP_ITERS:-3}
+MEASURE_ITERS=${DISPATCH_FFN_COMBINE_V2_MEASURE_ITERS:-5}
 
 ASCEND_HOME_PATH=${ASCEND_HOME_PATH:-/usr/local/Ascend/cann-8.5.0}
 MPI_ENV_BIN=${MPI_ENV_BIN:-/home/ntlab/miniconda3/envs/ltr_pto/bin}
@@ -41,6 +42,12 @@ while [[ $# -gt 0 ]]; do
     --topk) TOPK="$2"; shift 2 ;;
     --experts) EXPERTS="$2"; shift 2 ;;
     --max-output-size) MAX_OUTPUT_SIZE="$2"; shift 2 ;;
+    --seed) SEED="$2"; shift 2 ;;
+    --case-mode) CASE_MODE="$2"; shift 2 ;;
+    --atol) ATOL="$2"; shift 2 ;;
+    --rtol) RTOL="$2"; shift 2 ;;
+    --warmup-iters) WARMUP_ITERS="$2"; shift 2 ;;
+    --measure-iters) MEASURE_ITERS="$2"; shift 2 ;;
     *) echo "unknown option: $1"; exit 1 ;;
   esac
 done
@@ -49,6 +56,12 @@ SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
 OUT_DIR="${SCRIPT_DIR}/out"
 BUILD_DIR="${SCRIPT_DIR}/build"
 
+rm -rf \
+  "${BUILD_DIR}/dispatch_ffn_combine_v2_kernel_host_dir" \
+  "${BUILD_DIR}/dispatch_ffn_combine_v2_kernel_host-prefix" \
+  "${BUILD_DIR}/CMakeFiles/dispatch_ffn_combine_v2_kernel_host_stub_obj.dir" \
+  "${BUILD_DIR}/lib/libdispatch_ffn_combine_v2_kernel.so"
+
 python3 "${SCRIPT_DIR}/scripts/gen_data.py" \
   --output-dir "${OUT_DIR}" \
   --world-size "${WORLD_SIZE}" \
@@ -56,6 +69,7 @@ python3 "${SCRIPT_DIR}/scripts/gen_data.py" \
   --topk "${TOPK}" --experts "${EXPERTS}" \
   --max-output-size "${MAX_OUTPUT_SIZE}" \
   --seed "${SEED}" \
+  --case-mode "${CASE_MODE}" \
   --atol "${ATOL}" \
   --rtol "${RTOL}"
 

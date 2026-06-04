@@ -19,6 +19,14 @@ def fp32_to_bf16_value(arr: np.ndarray) -> np.ndarray:
     return (bits << 16).view(np.float32)
 
 
+def fp32_to_fp16_value(arr: np.ndarray) -> np.ndarray:
+    return arr.astype(np.float16).astype(np.float32)
+
+
+def cast_fp16_value(arr: np.ndarray) -> np.ndarray:
+    return arr.astype(np.float16).astype(np.float32)
+
+
 def write(path: Path, arr: np.ndarray) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     np.ascontiguousarray(arr).tofile(path)
@@ -58,13 +66,27 @@ def swiglu(x: np.ndarray) -> np.ndarray:
     return (x0 * sigmoid(x0)) * gate
 
 
-def quantize_rows_to_int8(x: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+def quantize_init_routing_to_int8(x: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     x = x.astype(np.float32)
     row_max = np.max(np.abs(x), axis=-1, keepdims=True)
-    row_max = np.maximum(row_max, 1e-6)
-    quant = np.round(x * 127.0 / row_max)
-    quant = np.clip(quant, -127.0, 127.0).astype(np.int8)
-    scale = (row_max[:, 0] / 127.0).astype(np.float32)
+    safe_row_max = np.where(row_max == 0.0, 1.0, row_max)
+    normalized = x * 127.0 / safe_row_max
+    quant = np.rint(cast_fp16_value(normalized))
+    quant = np.where(row_max == 0.0, 0.0, quant)
+    quant = np.clip(quant, -128.0, 127.0).astype(np.int8)
+    scale = np.where(row_max[:, 0] == 0.0, 0.0, row_max[:, 0] / 127.0).astype(np.float32)
+    return quant, scale
+
+
+def quantize_swiglu_to_int8(x: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    x = x.astype(np.float32)
+    row_max = np.max(np.abs(x), axis=-1, keepdims=True)
+    safe_row_max = np.where(row_max == 0.0, 1.0, row_max)
+    normalized = x * 127.0 / safe_row_max
+    quant = np.rint(normalized)
+    quant = np.where(row_max == 0.0, 0.0, quant)
+    quant = np.clip(quant, -128.0, 127.0).astype(np.int8)
+    scale = np.where(row_max[:, 0] == 0.0, 0.0, row_max[:, 0] / 127.0).astype(np.float32)
     return quant, scale
 
 
@@ -94,7 +116,7 @@ def make_scale_origin(experts: int, channels: int, offset: int, case_mode: str) 
     if case_mode == "zero":
         return np.zeros((experts, channels), dtype=np.float32)
     idx = np.arange(experts * channels, dtype=np.float32).reshape(experts, channels)
-    return ((1.0 / 128.0) * (1.0 + ((idx + offset) % 5.0) / 8.0)).astype(np.float32)
+    return ((1.0 / 16.0) * (1.0 + ((idx + offset) % 5.0) / 8.0)).astype(np.float32)
 
 
 def make_weight1(rank: int, args: argparse.Namespace, case_mode: str) -> np.ndarray:
@@ -144,16 +166,20 @@ def compute_outputs_and_workload(
                             continue
 
                         x_token = xs[src_rank][token_idx:token_idx + 1, :]
-                        qx, per_token_scale1 = quantize_rows_to_int8(x_token)
+                        qx, per_token_scale1 = quantize_init_routing_to_int8(x_token)
                         product1 = qx.astype(np.int32) @ weight1_nd[dst_rank][local_expert].astype(np.int32)
-                        dequant1 = product1.astype(np.float32) * scale1_origin[dst_rank][local_expert][None, :]
-                        dequant1 = (dequant1 * per_token_scale1[:, None]).astype(np.float16).astype(np.float32)
+                        gmm1_half = cast_fp16_value(
+                            product1.astype(np.float32) * scale1_origin[dst_rank][local_expert][None, :]
+                        )
+                        dequant1 = gmm1_half * per_token_scale1[:, None]
 
                         swiglu_out = swiglu(dequant1)[0]
-                        qswiglu, per_token_scale2 = quantize_rows_to_int8(swiglu_out[None, :])
+                        qswiglu, per_token_scale2 = quantize_swiglu_to_int8(swiglu_out[None, :])
                         product2 = qswiglu.astype(np.int32) @ weight2_nd[dst_rank][local_expert].astype(np.int32)
-                        dequant2 = product2.astype(np.float32) * scale2_origin[dst_rank][local_expert][None, :]
-                        result = (dequant2 * per_token_scale2[:, None])[0].astype(np.float32)
+                        gmm2_half = cast_fp16_value(
+                            product2.astype(np.float32) * scale2_origin[dst_rank][local_expert][None, :]
+                        )
+                        result = cast_fp16_value(gmm2_half * per_token_scale2[:, None])[0]
 
                         outputs[src_rank][token_idx, :] += probs_list[src_rank][token_idx, topk_idx] * result
                         kept_tokens += 1
@@ -166,7 +192,8 @@ def compute_outputs_and_workload(
         "routed_tokens_all_ranks": total_routed_tokens,
         "remote_routed_tokens_all_ranks": total_remote_routed_tokens,
         "compute_flops_all_ranks": total_routed_tokens * 3.0 * args.k * args.n,
-        "comm_bytes_all_ranks": total_remote_routed_tokens * (args.k * (np.dtype(np.int8).itemsize + np.dtype(np.float16).itemsize) + np.dtype(np.float32).itemsize),
+        "comm_bytes_all_ranks": total_remote_routed_tokens
+        * (args.k * (np.dtype(np.int8).itemsize + np.dtype(np.float16).itemsize) + np.dtype(np.float32).itemsize),
     }
     return outputs, workload
 
@@ -190,7 +217,7 @@ def build_rank_case(
     scale1_packed = pack_scale_fp32_to_int64(scale1_origin[rank])
     scale2_packed = pack_scale_fp32_to_int64(scale2_origin[rank])
 
-    write(out_dir / f"rank{rank}_x.bin", fp32_to_bf16_bits(xs[rank]))
+    write(out_dir / f"rank{rank}_x.bin", fp32_to_fp16_bits(xs[rank]))
     write(out_dir / f"rank{rank}_weight1.bin", weight1_packed)
     write(out_dir / f"rank{rank}_weight2.bin", weight2_packed)
     write(out_dir / f"rank{rank}_expert_idx.bin", expert_idx_list[rank].astype(np.int32))
@@ -213,7 +240,7 @@ def main() -> None:
     parser.add_argument("--max-output-size", type=int, default=32)
     parser.add_argument("--case-mode", choices=["zero", "cpu-golden"], default="cpu-golden")
     parser.add_argument("--seed", type=int, default=20260515)
-    parser.add_argument("--atol", type=float, default=1e-3)
+    parser.add_argument("--atol", type=float, default=1e-4)
     parser.add_argument("--rtol", type=float, default=1e-3)
     args = parser.parse_args()
 
@@ -230,7 +257,7 @@ def main() -> None:
     scale1_origin = [make_scale_origin(args.experts, args.n, rank * 17, args.case_mode) for rank in range(args.world_size)]
     scale2_origin = [make_scale_origin(args.experts, args.k, rank * 23, args.case_mode) for rank in range(args.world_size)]
 
-    xs = [fp32_to_bf16_value(x) for x in xs]
+    xs = [fp32_to_fp16_value(x) for x in xs]
     expected_out_list, workload = compute_outputs_and_workload(
         xs,
         weight1_nd,

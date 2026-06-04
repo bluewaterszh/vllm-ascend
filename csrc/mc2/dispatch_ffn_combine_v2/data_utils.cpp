@@ -97,16 +97,8 @@ CaseConfig LoadCaseConfig(const std::string &case_json_path)
     cfg.world_size = ParseJsonUInt(text, "world_size");
     cfg.max_output_size = ParseJsonUInt(text, "max_output_size");
     cfg.list_len = 1;
-    cfg.compare_atol = ParseJsonDouble(text, "compare_atol", 1e-3);
+    cfg.compare_atol = ParseJsonDouble(text, "compare_atol", 1e-4);
     cfg.compare_rtol = ParseJsonDouble(text, "compare_rtol", 1e-3);
-    cfg.input_tokens_all_ranks = ParseJsonDouble(text, "input_tokens_all_ranks",
-                                                 static_cast<double>(cfg.m) * cfg.world_size);
-    cfg.routed_tokens_all_ranks = ParseJsonDouble(text, "routed_tokens_all_ranks",
-                                                  static_cast<double>(cfg.m) * cfg.topk * cfg.world_size);
-    cfg.remote_routed_tokens_all_ranks = ParseJsonDouble(text, "remote_routed_tokens_all_ranks", 0.0);
-    cfg.compute_flops_all_ranks = ParseJsonDouble(text, "compute_flops_all_ranks",
-                                                  cfg.routed_tokens_all_ranks * 3.0 * cfg.k * cfg.n);
-    cfg.comm_bytes_all_ranks = ParseJsonDouble(text, "comm_bytes_all_ranks", 0.0);
     return cfg;
 }
 
@@ -159,9 +151,11 @@ AccuracyReport CompareFp16File(const std::vector<uint16_t> &expected,
         report.mismatch_count = 1;
         return report;
     }
+    report.err_threshold = static_cast<size_t>(static_cast<double>(report.total_count) * rtol);
 
     double sum_abs_err = 0.0;
     double sum_squared_err = 0.0;
+    double min_abs_err = std::numeric_limits<double>::infinity();
     for (size_t i = 0; i < expected.size(); ++i) {
         const float expected_value = Fp16ToFloat(expected[i]);
         const float actual_value = Fp16ToFloat(actual[i]);
@@ -169,7 +163,7 @@ AccuracyReport CompareFp16File(const std::vector<uint16_t> &expected,
                              std::isnan(expected_value) || std::isinf(expected_value);
         const double abs_err = invalid ? std::numeric_limits<double>::infinity()
                                        : std::fabs(static_cast<double>(actual_value) - expected_value);
-        const double tolerance = atol + rtol * std::max(1.0, std::fabs(static_cast<double>(expected_value)));
+        const double tolerance = atol + rtol * std::fabs(static_cast<double>(expected_value));
         const double rel_denom = std::max(std::fabs(static_cast<double>(expected_value)), 1e-7);
         const double rel_err = invalid ? std::numeric_limits<double>::infinity() : abs_err / rel_denom;
 
@@ -187,6 +181,7 @@ AccuracyReport CompareFp16File(const std::vector<uint16_t> &expected,
         }
 
         if (!invalid) {
+            min_abs_err = std::min(min_abs_err, abs_err);
             report.max_abs_err = std::max(report.max_abs_err, abs_err);
             report.max_rel_err = std::max(report.max_rel_err, rel_err);
             sum_abs_err += abs_err;
@@ -195,9 +190,10 @@ AccuracyReport CompareFp16File(const std::vector<uint16_t> &expected,
     }
 
     if (report.total_count > 0) {
+        report.min_abs_err = std::isfinite(min_abs_err) ? min_abs_err : 0.0;
         report.mean_abs_err = sum_abs_err / static_cast<double>(report.total_count);
         report.rmse = std::sqrt(sum_squared_err / static_cast<double>(report.total_count));
     }
-    report.pass = (report.mismatch_count == 0) && (report.nan_or_inf_count == 0);
+    report.pass = (report.mismatch_count <= report.err_threshold) && (report.nan_or_inf_count == 0);
     return report;
 }

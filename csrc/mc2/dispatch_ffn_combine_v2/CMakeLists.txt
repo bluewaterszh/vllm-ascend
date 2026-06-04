@@ -60,6 +60,7 @@ ascendc_include_directories(dispatch_ffn_combine_v2_kernel PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}
     ${CMAKE_CURRENT_SOURCE_DIR}/op_kernel
     ${CMAKE_CURRENT_SOURCE_DIR}/op_kernel/utils
+    ${CMAKE_CURRENT_SOURCE_DIR}/op_kernel/unpermute
     ${CMAKE_CURRENT_SOURCE_DIR}/op_kernel/moe_init_routing_quant_v2
     ${ASCEND_HOME_PATH}/include
     ${ASCEND_HOME_PATH}/aarch64-linux/ascendc/include/basic_api

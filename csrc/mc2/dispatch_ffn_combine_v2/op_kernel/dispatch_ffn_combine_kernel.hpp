@@ -230,9 +230,7 @@ public:
 
 private:
     CATLASS_DEVICE void initBuffer(Params const &params) {
-        #ifndef HCCL_COMM
-            shmem.initShmem(params.symmetricPtr, params.rank, params.rankSize, params.segmentSize);
-        #endif
+        shmem.initShmem(params.symmetricPtr, params.rank, params.rankSize, params.segmentSize);
         workspaceInfo = WorkspaceInfo(params);
         peermemInfo = PeermemInfo(params, shmem);
         cumsumMM.SetGlobalBuffer(reinterpret_cast<__gm__ int32_t*>(workspaceInfo.ptrcumsumMM));
@@ -374,6 +372,10 @@ private:
 
         AscendC::LocalTensor<int32_t> tmpExpertIdx = resource.ubBuf.template GetBufferByByte<int32_t>(0);
         int32_t copySize = endIdx - startIdx;
+        if (copySize <= 0) {
+            AscendC::SyncAll<true>();
+            return;
+        }
 
         AscendC::DataCopyPad(tmpExpertIdx[0], expertIdxGm[startIdx], 
                     {1, static_cast<uint16_t>(copySize * sizeof(int32_t)), 0, 0}, {}
@@ -660,9 +662,10 @@ private:
                 continue;
             }
             AscendC::GlobalTensor<int32_t> srcAddress;
-            srcAddress.SetGlobalBuffer(reinterpret_cast<__gm__ int32_t*>(shmem() + localTokenPerExpertOffset));
+            __gm__ int32_t* srcLocalPtr = reinterpret_cast<__gm__ int32_t*>(shmem() + localTokenPerExpertOffset);
+            srcAddress.SetGlobalBuffer(srcLocalPtr);
             AscendC::GlobalTensor<int32_t> dstAddress;
-            __gm__ void* dstPeermemPtr = shmem(localTokenPerExpertOffset, coreIdx);
+            __gm__ void* dstPeermemPtr = shmem(localTokenPerExpertOffset, dstEpIdx);
             dstAddress.SetGlobalBuffer((__gm__ int32_t * )dstPeermemPtr);
 
             AscendC::SetFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID0);

@@ -88,12 +88,19 @@ public:
         AscendC::LocalTensor<int32_t> ub;
         FORCE_INLINE_AICORE
         HcclShmem(){
-            auto contextGM0 = AscendC::GetHcclContext<HCCL_GROUP_ID_0>();
-            WinContext_ = (__gm__ HcclOpResParamCustom *)contextGM0;
-
-            m_rank = WinContext_->localUsrRankId;
-            m_rankSize = WinContext_->rankSize;
-            m_segmentSize = WinContext_->winSize;
+            m_rank = 0;
+            m_rankSize = 0;
+            m_segmentSize = 0;
+        }
+        // Standalone (kernel-direct launch) path: there is no AICPU HCCL context,
+        // so peermem window bases are plumbed from tiling via a device window table.
+        FORCE_INLINE_AICORE
+        void initShmem(GM_ADDR symmetricPtr_, size_t rank, size_t rankSize, size_t segmentSize) {
+            symmetricPtr = symmetricPtr_;
+            m_rank = static_cast<int32_t>(rank);
+            m_rankSize = static_cast<int32_t>(rankSize);
+            m_segmentSize = segmentSize;
+            useSymmetricTable_ = true;
         }
     #else
         FORCE_INLINE_AICORE
@@ -118,6 +125,9 @@ public:
     FORCE_INLINE_AICORE
     GM_ADDR operator() () const {   // No parameters: return pointer to local peermem
         #ifdef HCCL_COMM
+            if (useSymmetricTable_) {
+                return WindowBase(symmetricPtr, m_rank);
+            }
             return (GM_ADDR)(WinContext_->localWindowsIn);
         #else
             return WindowBase(symmetricPtr, m_rank);
@@ -127,6 +137,9 @@ public:
     FORCE_INLINE_AICORE
     GM_ADDR operator() (int32_t index) const {  // With index parameter: return pointer to the base address of remote peermem
         #ifdef HCCL_COMM
+            if (useSymmetricTable_) {
+                return WindowBase(symmetricPtr, index);
+            }
             return (GM_ADDR)((index == m_rank) ? WinContext_->localWindowsIn :
                                     ((HcclRankRelationResV2Custom *)(WinContext_->remoteRes[index].nextDevicePtr))->windowsIn);
         #else
@@ -137,11 +150,14 @@ public:
     FORCE_INLINE_AICORE
     GM_ADDR operator () (int64_t offset, int32_t rankId) const  {
         #ifdef HCCL_COMM
-            if (offset < 0 || offset >= m_segmentSize) {
+            if (offset < 0 || offset >= static_cast<int64_t>(m_segmentSize)) {
                 return nullptr;
             }
             if (rankId < 0 || rankId >= m_rankSize) {
                 return nullptr;
+            }
+            if (useSymmetricTable_) {
+                return WindowBase(symmetricPtr, rankId) + offset;
             }
             return (GM_ADDR)((rankId == m_rank) ? WinContext_->localWindowsIn :
                                     ((HcclRankRelationResV2Custom *)(WinContext_->remoteRes[rankId].nextDevicePtr))->windowsIn) + offset;
@@ -328,6 +344,7 @@ private:
     size_t m_segmentSize;
     float sumTarget_{0.0};
     int32_t epStateValue_;
+    bool useSymmetricTable_{false};
 };
 
 

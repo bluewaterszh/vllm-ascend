@@ -14,13 +14,8 @@ struct CaseConfig {
     uint32_t world_size = 0;
     uint32_t max_output_size = 0;
     uint32_t list_len = 1;
-    double compare_atol = 1e-3;
+    double compare_atol = 1e-4;
     double compare_rtol = 1e-3;
-    double input_tokens_all_ranks = 0.0;
-    double routed_tokens_all_ranks = 0.0;
-    double remote_routed_tokens_all_ranks = 0.0;
-    double compute_flops_all_ranks = 0.0;
-    double comm_bytes_all_ranks = 0.0;
 };
 
 struct DispatchFFNCombineBuildResult {

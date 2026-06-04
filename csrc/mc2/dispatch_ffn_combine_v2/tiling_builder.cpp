@@ -106,7 +106,7 @@ DispatchFFNCombineBuildResult BuildDispatchFFNCombineTiling(const CaseConfig &cf
     result.block_dim = GetBlockDim(info.aivNum);
     result.workspace_bytes = SYSTEM_NEED_WORKSPACE + cocWorkspace;
     result.tiling.launchConfig.blockDim = result.block_dim;
-    result.tiling.launchConfig.tilingKey = 1000010;
+    result.tiling.launchConfig.tilingKey = 0;
     result.tiling.launchConfig.workspaceBytes = result.workspace_bytes;
     return result;
 }
