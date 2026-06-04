@@ -127,10 +127,11 @@ target_include_directories(dispatch_ffn_combine_v2 PRIVATE
 
 target_link_directories(dispatch_ffn_combine_v2 PRIVATE
     ${ASCEND_HOME_PATH}/lib64
+    ${ASCEND_HOME_PATH}/aarch64-linux/lib64
 )
 
 target_link_libraries(dispatch_ffn_combine_v2 PRIVATE
     host_intf_pub
     dispatch_ffn_combine_v2_kernel
-    ascendcl hcomm runtime nnopbase tiling_api platform c_sec dl pthread stdc++ m
+    ascendcl hccl hccl_fwk hcomm runtime nnopbase tiling_api platform c_sec dl pthread stdc++ m
 )
