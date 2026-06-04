@@ -13,16 +13,50 @@ This directory contains a standalone multi-rank runner for the int8
 
 Current kernel launch uses `tilingKey = 0`.
 
-## Build And Run
+## Environment
+
+Use the following environment before building or running the standalone runner:
 
 ```bash
 cd /home/ntlab/zy/code/zhangyuan/vllm-ascend-zy/csrc/mc2/dispatch_ffn_combine_v2
 
 export ASCEND_HOME_PATH=/usr/local/Ascend/cann-8.5.0
+source "${ASCEND_HOME_PATH}/set_env.sh"
+
 export MPI_ENV_BIN=/home/ntlab/miniconda3/envs/ltr_pto/bin
 export MPI_ENV_LIB=/home/ntlab/miniconda3/envs/ltr_pto/lib
+export PATH=${MPI_ENV_BIN}:$PATH
+export LD_LIBRARY_PATH=$PWD/build/lib:${MPI_ENV_LIB}:${LD_LIBRARY_PATH:-}
 export MPI_LIB_PATH=${MPI_ENV_LIB}/libmpi.so
+export MPI_RUNNER=mpirun
+
+# Use cards 2 and 3 for the current 2-rank standalone case.
 export ASCEND_RT_VISIBLE_DEVICES=2,3
+```
+
+## One-command Run
+
+`run.sh` generates `out/`, configures CMake, builds the executable, and launches
+`mpirun`.
+
+```bash
+bash run.sh \
+  --soc ascend910_93 \
+  --world-size 2 \
+  --m 16 \
+  --k 128 \
+  --n 128 \
+  --topk 2 \
+  --experts 2 \
+  --max-output-size 32
+```
+
+The default iteration counts can be overridden either by command-line options or
+environment variables:
+
+```bash
+export DISPATCH_FFN_COMBINE_V2_WARMUP_ITERS=1
+export DISPATCH_FFN_COMBINE_V2_MEASURE_ITERS=0
 
 bash run.sh \
   --soc ascend910_93 \
@@ -33,6 +67,23 @@ bash run.sh \
   --topk 2 \
   --experts 2 \
   --max-output-size 32
+```
+
+## Manual Build And Run
+
+Use this path when reusing an existing generated `out/` case or when you want to
+separate build from execution.
+
+```bash
+cmake -S . -B build -DSOC_VERSION=ascend910_93
+cmake --build build --target dispatch_ffn_combine_v2 -j16
+
+export DISPATCH_FFN_COMBINE_V2_CASE_DIR=$PWD/out
+export DISPATCH_FFN_COMBINE_V2_WARMUP_ITERS=1
+export DISPATCH_FFN_COMBINE_V2_MEASURE_ITERS=0
+
+timeout --kill-after=10s 80s \
+  mpirun -n 2 "$PWD/build/dispatch_ffn_combine_v2"
 ```
 
 Useful run overrides:
