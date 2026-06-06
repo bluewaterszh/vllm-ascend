@@ -22,6 +22,7 @@
 namespace MoeInitRoutingQuantV2 {
 using namespace AscendC;
 using namespace optiling;
+
 class MoeV2SortMultiCore : public MoeV2SortBase {
  public:
   __aicore__ inline MoeV2SortMultiCore(){};

@@ -55,8 +55,7 @@ class DispatchFFNCombine {
 public:
     __aicore__ inline DispatchFFNCombine() {};
     __aicore__ inline void Init(GM_ADDR xGM, GM_ADDR weight1GM, GM_ADDR weight2GM, GM_ADDR expertIdGM, GM_ADDR scale1GM, GM_ADDR scale2GM,
-                                GM_ADDR probs, GM_ADDR xActiveMaskGM, GM_ADDR outGM, GM_ADDR expertTokenNums, GM_ADDR workspaceGM,
-                                const __gm__ DispatchFFNCombineTilingData *tilingData);
+                                GM_ADDR probs, GM_ADDR xActiveMaskGM, GM_ADDR outGM, GM_ADDR expertTokenNums, GM_ADDR workspaceGM, GM_ADDR tilingGM);
     __aicore__ inline void Process();
 
 
@@ -72,6 +71,7 @@ private:
     GM_ADDR outGM_;
     GM_ADDR gmExpertTokenNums_;
     GM_ADDR workspaceGM_;
+    GM_ADDR tilingGM_;
 
     GM_ADDR moeInitRoutingQuantV2Scale = nullptr;
     GM_ADDR moeInitRoutingQuantV2Offset = nullptr;
@@ -83,8 +83,6 @@ private:
     int32_t rank;
     int32_t rankSize;
     int32_t aivNum;
-    GM_ADDR symmetricPtr_;
-    uint64_t segmentSize_;
 
     int32_t m0;
     int32_t k0;
@@ -117,9 +115,11 @@ private:
 
 template <TemplateMMA2AClass>
 __aicore__ inline void DispatchFFNCombine<TemplateMMA2ACFunc>::Init(GM_ADDR xGM, GM_ADDR weight1GM, GM_ADDR weight2GM, GM_ADDR expertIdGM, GM_ADDR scale1GM, GM_ADDR scale2GM,
-                                                                    GM_ADDR probs, GM_ADDR xActiveMaskGM, GM_ADDR outGM, GM_ADDR expertTokenNums, GM_ADDR workspaceGM,
-                                                                    const __gm__ DispatchFFNCombineTilingData *tilingData)
+                                                                    GM_ADDR probs, GM_ADDR xActiveMaskGM, GM_ADDR outGM, GM_ADDR expertTokenNums, GM_ADDR workspaceGM, GM_ADDR tilingGM)
 {
+    REGISTER_TILING_DEFAULT(DispatchFFNCombineTilingData);
+    const __gm__ DispatchFFNCombineTilingData *tilingData =
+        reinterpret_cast<__gm__ DispatchFFNCombineTilingData *>(tilingGM);
 
     xGM_ = xGM;
     weight1GM_ = weight1GM;
@@ -134,6 +134,7 @@ __aicore__ inline void DispatchFFNCombine<TemplateMMA2ACFunc>::Init(GM_ADDR xGM,
     gmExpertTokenNums_ = expertTokenNums;
 
     workspaceGM_ = workspaceGM;
+    tilingGM_ = tilingGM;
 
     aivNum = tilingData->dispatchFFNCombineInfo.aivNum;
 
@@ -272,10 +273,18 @@ __aicore__ inline void DispatchFFNCombine<TemplateMMA2ACFunc>::Init(GM_ADDR xGM,
         tilingData->cocTiling.moeInitRoutingQuantV2TilingData.gatherOutComputeParamsOp.colLoops;
     initRoutingQuantTilingKey = tilingData->cocTiling.initRoutingQuantTilingKey;
 
-    rank = static_cast<int32_t>(tilingData->runtimeInfo.rank);
-    rankSize = static_cast<int32_t>(tilingData->runtimeInfo.rankSize);
-    symmetricPtr_ = reinterpret_cast<GM_ADDR>(tilingData->runtimeInfo.symmetricPtr);
-    segmentSize_ = tilingData->runtimeInfo.segmentSize;
+#ifdef HCCL_COMM
+    if (tilingData->runtimeInfo.symmetricPtr != 0) {
+        AscendC::SetHcclContext<HCCL_GROUP_ID_0>(
+            reinterpret_cast<__gm__ uint8_t *>(tilingData->runtimeInfo.symmetricPtr));
+    }
+#endif
+    auto contextGM0 = AscendC::GetHcclContext<HCCL_GROUP_ID_0>();
+    __gm__ HcclOpResParamCustom *WinContext_{nullptr};
+    WinContext_ = (__gm__ HcclOpResParamCustom *)contextGM0;
+
+    rank = WinContext_->localUsrRankId;
+    rankSize = WinContext_->rankSize;
 }
 
 template <TemplateMMA2AClass>
@@ -380,7 +389,7 @@ __aicore__ inline void DispatchFFNCombine<TemplateMMA2ACFunc>::Process()
     }
     typename MatmulKernel::Params params{
         problemShape, static_cast<uint32_t>(EP), static_cast<uint32_t>(listLen), static_cast<uint32_t>(expertPerRank), static_cast<uint32_t>(maxOutputSize),
-        static_cast<uint32_t>(rank), static_cast<uint32_t>(rankSize), ubMoveNum, symmetricPtr_, segmentSize_,
+        static_cast<uint32_t>(rank), static_cast<uint32_t>(rankSize),
         static_cast<uint32_t>(topK), initRoutingQuantTilingKey,
         epilogueCoreNum, epilogueGranularity,
         xGM_, layoutA1, layoutA2,
@@ -391,7 +400,7 @@ __aicore__ inline void DispatchFFNCombine<TemplateMMA2ACFunc>::Process()
         outGM_, layoutD1, layoutD2,
         expertIdGM_, moeInitRoutingQuantV2Scale, moeInitRoutingQuantV2Offset,
         expertTokensBeforeCapacity, probs_,
-        workspaceGM_, gmExpertTokenNums_, xActiveMaskGM_, moeInitRoutingQuantV2TilingData};
+        workspaceGM_, gmExpertTokenNums_, ubMoveNum, xActiveMaskGM_, tilingGM_, moeInitRoutingQuantV2TilingData};
     //Call kernel
     MatmulKernel kernel(params);
     kernel(params);

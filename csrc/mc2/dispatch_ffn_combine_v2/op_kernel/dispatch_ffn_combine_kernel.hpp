@@ -21,6 +21,7 @@
 #include "catlass/gemm_coord.hpp"
 #include "catlass/matrix_coord.hpp"
 #include "catlass/epilogue/tile/tile_copy.hpp"
+#include "../kernel_launch.hpp"
 
 #ifndef HCCL_COMM
     #include "block_mmad_preload_async_fixpipe_quant.hpp"
@@ -123,7 +124,7 @@ public:
         uint32_t rankSize;
         int32_t ubMoveNum;
         GM_ADDR symmetricPtr;
-        uint64_t segmentSize;
+        GM_ADDR tilingGM;
         //--------------
         GM_ADDR expertIdx;
         GM_ADDR moeInitRoutingQuantV2Scale;
@@ -150,7 +151,7 @@ public:
         Params(
             GemmCoord problemShape_,
             uint32_t EP_, uint32_t listLen_, uint32_t expertPerRank_, uint32_t maxOutputSize_,
-            uint32_t rank_, uint32_t rankSize_, int32_t ubMoveNum_, GM_ADDR symmetricPtr_, uint64_t segmentSize_, int64_t topK_,
+            uint32_t rank_, uint32_t rankSize_, int64_t topK_,
             uint64_t initRoutingQuantTilingKey_, uint32_t epilogueCoreNum_, uint32_t epilogueGranularity_,
             GM_ADDR ptrA_, LayoutA layoutA_, LayoutA layoutA2_,
             GM_ADDR ptrB1_, LayoutB layoutB1_,
@@ -161,12 +162,13 @@ public:
             GM_ADDR expertIdx_, GM_ADDR moeInitRoutingQuantV2Scale_,
             GM_ADDR moeInitRoutingQuantV2Offset_,
             GM_ADDR expertTokensBeforeCapacity_, GM_ADDR probs_,
-            GM_ADDR ptrWorkspace_, GM_ADDR gmExpertTokenNums_,
+            GM_ADDR ptrWorkspace_, GM_ADDR gmExpertTokenNums_, int32_t ubMoveNum_,
             GM_ADDR ptrXActiveMask_,
+            GM_ADDR tilingGM_,
             optiling::MoeInitRoutingQuantV2TilingData moeInitRoutingQuantV2TilingData_
         ) : problemShape(problemShape_),
             EP(EP_), listLen(listLen_), expertPerRank(expertPerRank_), maxOutputSize(maxOutputSize_),
-            rank(rank_), rankSize(rankSize_), ubMoveNum(ubMoveNum_), symmetricPtr(symmetricPtr_), segmentSize(segmentSize_), topK(topK_),
+            rank(rank_), rankSize(rankSize_), topK(topK_),
             initRoutingQuantTilingKey(initRoutingQuantTilingKey_),
             epilogueCoreNum(epilogueCoreNum_), epilogueGranularity(epilogueGranularity_),
             ptrA(reinterpret_cast<__gm__ ElementA *>(ptrA_)), layoutA(layoutA_), layoutA2(layoutA2_),
@@ -178,8 +180,9 @@ public:
             expertIdx(expertIdx_), moeInitRoutingQuantV2Scale(moeInitRoutingQuantV2Scale_),
             moeInitRoutingQuantV2Offset(moeInitRoutingQuantV2Offset_),
             expertTokensBeforeCapacity(expertTokensBeforeCapacity_), probs(probs_),
-            ptrWorkspace(ptrWorkspace_), ptrExpertTokenNums(gmExpertTokenNums_),
+            ptrWorkspace(ptrWorkspace_), ptrExpertTokenNums(gmExpertTokenNums_), ubMoveNum(ubMoveNum_),
             ptrXActiveMask(ptrXActiveMask_),
+            tilingGM(tilingGM_),
             moeInitRoutingQuantV2TilingData(moeInitRoutingQuantV2TilingData_)
         {
         }
@@ -230,7 +233,11 @@ public:
 
 private:
     CATLASS_DEVICE void initBuffer(Params const &params) {
-        shmem.initShmem(params.symmetricPtr, params.rank, params.rankSize, params.segmentSize);
+        #ifndef HCCL_COMM
+            shmem.initShmem(params.symmetricPtr, params.rank, params.rankSize);
+        #else
+            shmem.initHccl(reinterpret_cast<__gm__ DispatchFFNCombineTilingData *>(params.tilingGM));
+        #endif
         workspaceInfo = WorkspaceInfo(params);
         peermemInfo = PeermemInfo(params, shmem);
         cumsumMM.SetGlobalBuffer(reinterpret_cast<__gm__ int32_t*>(workspaceInfo.ptrcumsumMM));
@@ -372,10 +379,6 @@ private:
 
         AscendC::LocalTensor<int32_t> tmpExpertIdx = resource.ubBuf.template GetBufferByByte<int32_t>(0);
         int32_t copySize = endIdx - startIdx;
-        if (copySize <= 0) {
-            AscendC::SyncAll<true>();
-            return;
-        }
 
         AscendC::DataCopyPad(tmpExpertIdx[0], expertIdxGm[startIdx], 
                     {1, static_cast<uint16_t>(copySize * sizeof(int32_t)), 0, 0}, {}
@@ -662,10 +665,9 @@ private:
                 continue;
             }
             AscendC::GlobalTensor<int32_t> srcAddress;
-            __gm__ int32_t* srcLocalPtr = reinterpret_cast<__gm__ int32_t*>(shmem() + localTokenPerExpertOffset);
-            srcAddress.SetGlobalBuffer(srcLocalPtr);
+            srcAddress.SetGlobalBuffer(reinterpret_cast<__gm__ int32_t*>(shmem() + localTokenPerExpertOffset));
             AscendC::GlobalTensor<int32_t> dstAddress;
-            __gm__ void* dstPeermemPtr = shmem(localTokenPerExpertOffset, dstEpIdx);
+            __gm__ void* dstPeermemPtr = shmem(localTokenPerExpertOffset, coreIdx);
             dstAddress.SetGlobalBuffer((__gm__ int32_t * )dstPeermemPtr);
 
             AscendC::SetFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID0);

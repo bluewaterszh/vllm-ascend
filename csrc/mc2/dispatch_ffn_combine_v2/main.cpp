@@ -6,6 +6,7 @@
 #include <cmath>
 #include <iomanip>
 #include <iostream>
+#include <limits>
 #include <numeric>
 #include <sstream>
 #include <stdexcept>
@@ -36,17 +37,6 @@ struct DeviceBuffer {
     {
         if (ptr != nullptr) {
             aclrtFree(ptr);
-        }
-    }
-};
-
-struct EventHandle {
-    aclrtEvent event = nullptr;
-
-    ~EventHandle()
-    {
-        if (event != nullptr) {
-            aclrtDestroyEvent(event);
         }
     }
 };
@@ -155,11 +145,16 @@ void PrintOrderedByRank(int rank_id, int world_size, const std::string &text)
 bool ZeroWindowMemory(const StandaloneRankRuntime &runtime)
 {
     const uint64_t window_bytes = runtime.hccl.host_ctx.winSize;
-    for (uint32_t i = 0; i < runtime.hccl.host_ctx.rankNum; ++i) {
-        void *window_ptr = reinterpret_cast<void *>(runtime.hccl.host_ctx.windowsIn[i]);
-        if (aclrtMemset(window_ptr, window_bytes, 0, window_bytes) != ACL_SUCCESS) {
-            return false;
-        }
+    const uint32_t rank_id = runtime.hccl.host_ctx.rankId;
+    if (rank_id >= HCCL_STANDALONE_MAX_RANK_NUM) {
+        return false;
+    }
+    void *window_ptr = reinterpret_cast<void *>(runtime.hccl.host_ctx.windowsIn[rank_id]);
+    if (window_ptr == nullptr || window_bytes == 0) {
+        return false;
+    }
+    if (aclrtMemset(window_ptr, window_bytes, 0, window_bytes) != ACL_SUCCESS) {
+        return false;
     }
     return true;
 }
@@ -171,10 +166,19 @@ void ZeroDeviceBuffer(const DeviceBuffer &buffer, const char *name)
     }
 }
 
+void SynchronizeStream(aclrtStream stream)
+{
+    const aclError sync_ret = aclrtSynchronizeStream(stream);
+    if (sync_ret != ACL_SUCCESS) {
+        throw std::runtime_error(BuildAclError("stream sync failed", sync_ret));
+    }
+}
+
 void PrepareIterationState(const StandaloneRankRuntime &runtime,
                            const DeviceBuffer &out_dev,
                            const DeviceBuffer &expert_token_nums_dev,
-                           const DeviceBuffer &workspace_dev)
+                           const DeviceBuffer &workspace_dev,
+                           const DeviceBuffer &profile_dev)
 {
     if (!ZeroWindowMemory(runtime)) {
         throw std::runtime_error("failed to zero HCCL windows");
@@ -182,6 +186,7 @@ void PrepareIterationState(const StandaloneRankRuntime &runtime,
     ZeroDeviceBuffer(out_dev, "out buffer");
     ZeroDeviceBuffer(expert_token_nums_dev, "expert_token_nums");
     ZeroDeviceBuffer(workspace_dev, "workspace");
+    ZeroDeviceBuffer(profile_dev, "profile buffer");
 }
 
 PerfStats CalcStats(const std::vector<double> &samples)
@@ -200,6 +205,46 @@ PerfStats CalcStats(const std::vector<double> &samples)
     }
     stats.stddev = std::sqrt(variance / static_cast<double>(samples.size()));
     return stats;
+}
+
+double SysCntTicksToUs(uint64_t ticks)
+{
+    return static_cast<double>(ticks) * static_cast<double>(DISPATCH_FFN_COMBINE_SYS_CNT_NS_PER_TICK) / 1000.0;
+}
+
+double ReadKernelProfileUs(const DeviceBuffer &profile_dev, uint32_t block_dim)
+{
+    if (profile_dev.bytes == 0 || block_dim == 0) {
+        return 0.0;
+    }
+
+    std::vector<uint8_t> profile(profile_dev.bytes, 0);
+    if (aclrtMemcpy(profile.data(), profile.size(), profile_dev.ptr, profile_dev.bytes,
+                    ACL_MEMCPY_DEVICE_TO_HOST) != ACL_SUCCESS) {
+        throw std::runtime_error("device->host profile copy failed");
+    }
+
+    uint64_t start_min = std::numeric_limits<uint64_t>::max();
+    uint64_t end_max = 0;
+    for (uint32_t block = 0; block < block_dim; ++block) {
+        for (uint32_t profile_idx = 0; profile_idx < DISPATCH_FFN_COMBINE_PROFILE_ENTRIES_PER_BLOCK; ++profile_idx) {
+            const size_t offset =
+                static_cast<size_t>(block) * DISPATCH_FFN_COMBINE_PROFILE_BYTES_PER_BLOCK +
+                static_cast<size_t>(profile_idx) * DISPATCH_FFN_COMBINE_PROFILE_ENTRY_BYTES;
+            const uint64_t *entry = reinterpret_cast<const uint64_t *>(profile.data() + offset);
+            const uint64_t start = entry[DISPATCH_FFN_COMBINE_PROFILE_KERNEL_START];
+            const uint64_t end = entry[DISPATCH_FFN_COMBINE_PROFILE_KERNEL_END];
+            if (start == 0 || end == 0 || end < start) {
+                continue;
+            }
+            start_min = std::min(start_min, start);
+            end_max = std::max(end_max, end);
+        }
+    }
+    if (start_min == std::numeric_limits<uint64_t>::max() || end_max < start_min) {
+        return 0.0;
+    }
+    return SysCntTicksToUs(end_max - start_min);
 }
 
 std::vector<double> GatherMaxSamplesToRoot(const std::vector<double> &local_samples,
@@ -248,7 +293,7 @@ void PrintPerfSummary(int warmup_iters,
     std::cout << "\n===============================================================\n";
     std::cout << "[PROFILE] dispatch_ffn_combine_v2\n";
     std::cout << "  iters: warmup=" << warmup_iters << " measure=" << measure_iters << '\n';
-    std::cout << "  kernel(max rank per iter): avg=" << kernel_stats.avg << " us"
+    std::cout << "  kernel(syscnt max rank per iter): avg=" << kernel_stats.avg << " us"
               << " min=" << kernel_stats.min << " us"
               << " max=" << kernel_stats.max << " us"
               << " std=" << kernel_stats.stddev << " us\n";
@@ -270,6 +315,7 @@ bool RunOneRank(int rank_id, int world_size, const std::string &case_dir, const 
     try {
         const int warmup_iters = ParseEnvInt("DISPATCH_FFN_COMBINE_V2_WARMUP_ITERS", kDefaultWarmupIters);
         const int measure_iters = ParseEnvInt("DISPATCH_FFN_COMBINE_V2_MEASURE_ITERS", kDefaultMeasureIters);
+        const bool skip_accuracy = ParseEnvInt("DISPATCH_FFN_COMBINE_V2_SKIP_ACCURACY", 0) != 0;
         if (warmup_iters < 0 || measure_iters < 0) {
             throw std::runtime_error("warmup/measure iters must be non-negative");
         }
@@ -286,8 +332,13 @@ bool RunOneRank(int rank_id, int world_size, const std::string &case_dir, const 
         const std::vector<uint8_t> scale2 = ReadBinaryFile(files.scale2);
         const std::vector<uint8_t> probs = ReadBinaryFile(files.probs);
         const std::vector<uint8_t> x_active_mask = ReadBinaryFile(files.x_active_mask);
-        const std::vector<uint8_t> expected_out_bytes = ReadBinaryFile(files.expected_out);
-        const std::vector<uint16_t> expected_out = BytesToU16(expected_out_bytes);
+        std::vector<uint16_t> expected_out;
+        if (!skip_accuracy) {
+            const std::vector<uint8_t> expected_out_bytes = ReadBinaryFile(files.expected_out);
+            expected_out = BytesToU16(expected_out_bytes);
+        }
+        const bool all_tokens_active = std::all_of(x_active_mask.begin(), x_active_mask.end(),
+                                                   [](uint8_t value) { return value != 0; });
 
         DeviceBuffer x_dev = MakeDeviceBuffer(x.size(), x.data());
         DeviceBuffer weight1_dev = MakeDeviceBuffer(weight1.size(), weight1.data());
@@ -305,9 +356,13 @@ bool RunOneRank(int rank_id, int world_size, const std::string &case_dir, const 
         DeviceBuffer expert_token_nums_dev = MakeDeviceBuffer(static_cast<size_t>(cfg.expert_per_rank) * sizeof(int32_t));
         DeviceBuffer workspace_dev = MakeDeviceBuffer(build.workspace_bytes);
         DeviceBuffer tiling_dev = MakeDeviceBuffer(sizeof(build.tiling), &build.tiling);
+        const size_t profile_bytes =
+            static_cast<size_t>(build.block_dim) * DISPATCH_FFN_COMBINE_PROFILE_BYTES_PER_BLOCK;
+        DeviceBuffer profile_dev = MakeDeviceBuffer(profile_bytes);
 
         DispatchFFNCombineLaunchArgs args;
         args.block_dim = build.block_dim;
+        args.func_key = DISPATCH_FFN_COMBINE_STANDALONE_FUNC_KEY;
         args.tiling = tiling_dev.ptr;
         args.workspace = workspace_dev.ptr;
         args.x = x_dev.ptr;
@@ -317,25 +372,17 @@ bool RunOneRank(int rank_id, int world_size, const std::string &case_dir, const 
         args.scale1 = scale1_list_dev.ptr;
         args.scale2 = scale2_list_dev.ptr;
         args.probs = probs_dev.ptr;
-        args.x_active_mask = x_active_mask_dev.ptr;
+        args.x_active_mask = all_tokens_active ? nullptr : x_active_mask_dev.ptr;
         args.out = out_dev.ptr;
         args.expert_token_nums = expert_token_nums_dev.ptr;
-
-        EventHandle kernel_start;
-        EventHandle kernel_end;
-        if (measure_iters > 0) {
-            if (aclrtCreateEvent(&kernel_start.event) != ACL_SUCCESS ||
-                aclrtCreateEvent(&kernel_end.event) != ACL_SUCCESS) {
-                throw std::runtime_error("failed to create ACL events");
-            }
-        }
+        args.profile_data = profile_dev.ptr;
 
         auto launch_once = [&]() {
-            launchDispatchFFNCombine(args, runtime.compute_stream);
-            aclError sync_ret = aclrtSynchronizeStream(runtime.compute_stream);
-            if (sync_ret != ACL_SUCCESS) {
-                throw std::runtime_error(BuildAclError("stream sync failed", sync_ret));
+            const uint32_t launch_ret = launchDispatchFFNCombine(args, runtime.compute_stream);
+            if (launch_ret != 0) {
+                throw std::runtime_error("kernel launch failed, ret=" + std::to_string(launch_ret));
             }
+            SynchronizeStream(runtime.compute_stream);
         };
 
         std::vector<double> kernel_times_us;
@@ -345,35 +392,25 @@ bool RunOneRank(int rank_id, int world_size, const std::string &case_dir, const 
 
         CommMpiBarrier();
         for (int iter = 0; iter < warmup_iters; ++iter) {
-            PrepareIterationState(runtime, out_dev, expert_token_nums_dev, workspace_dev);
+            PrepareIterationState(runtime, out_dev, expert_token_nums_dev, workspace_dev, profile_dev);
             CommMpiBarrier();
             launch_once();
             CommMpiBarrier();
         }
 
         for (int iter = 0; iter < measure_iters; ++iter) {
-            PrepareIterationState(runtime, out_dev, expert_token_nums_dev, workspace_dev);
+            PrepareIterationState(runtime, out_dev, expert_token_nums_dev, workspace_dev, profile_dev);
             CommMpiBarrier();
             const auto host_start = std::chrono::high_resolution_clock::now();
-            if (aclrtRecordEvent(kernel_start.event, runtime.compute_stream) != ACL_SUCCESS) {
-                throw std::runtime_error("failed to record kernel start event");
+            const uint32_t launch_ret = launchDispatchFFNCombine(args, runtime.compute_stream);
+            if (launch_ret != 0) {
+                throw std::runtime_error("kernel launch failed, ret=" + std::to_string(launch_ret));
             }
-            launchDispatchFFNCombine(args, runtime.compute_stream);
-            if (aclrtRecordEvent(kernel_end.event, runtime.compute_stream) != ACL_SUCCESS) {
-                throw std::runtime_error("failed to record kernel end event");
-            }
-            aclError sync_ret = aclrtSynchronizeStream(runtime.compute_stream);
-            if (sync_ret != ACL_SUCCESS) {
-                throw std::runtime_error(BuildAclError("stream sync failed", sync_ret));
-            }
+            SynchronizeStream(runtime.compute_stream);
             CommMpiBarrier();
             const auto host_end = std::chrono::high_resolution_clock::now();
 
-            float kernel_ms = 0.0f;
-            if (aclrtEventElapsedTime(&kernel_ms, kernel_start.event, kernel_end.event) != ACL_SUCCESS) {
-                throw std::runtime_error("failed to query kernel elapsed time");
-            }
-            kernel_times_us.push_back(static_cast<double>(kernel_ms) * 1000.0);
+            kernel_times_us.push_back(ReadKernelProfileUs(profile_dev, build.block_dim));
             e2e_times_us.push_back(std::chrono::duration<double, std::micro>(host_end - host_start).count());
         }
 
@@ -383,34 +420,41 @@ bool RunOneRank(int rank_id, int world_size, const std::string &case_dir, const 
             PrintPerfSummary(warmup_iters, measure_iters, kernel_max_samples, e2e_max_samples);
         }
 
-        PrepareIterationState(runtime, out_dev, expert_token_nums_dev, workspace_dev);
+        PrepareIterationState(runtime, out_dev, expert_token_nums_dev, workspace_dev, profile_dev);
         CommMpiBarrier();
         launch_once();
         CommMpiBarrier();
 
-        std::vector<uint16_t> actual_out(static_cast<size_t>(cfg.m) * cfg.k);
-        if (aclrtMemcpy(actual_out.data(), actual_out.size() * sizeof(uint16_t), out_dev.ptr,
-                        actual_out.size() * sizeof(uint16_t), ACL_MEMCPY_DEVICE_TO_HOST) != ACL_SUCCESS) {
-            throw std::runtime_error("device->host output copy failed");
-        }
-        std::vector<int32_t> expert_token_nums(cfg.expert_per_rank);
-        if (aclrtMemcpy(expert_token_nums.data(), expert_token_nums.size() * sizeof(int32_t),
-                        expert_token_nums_dev.ptr, expert_token_nums.size() * sizeof(int32_t),
-                        ACL_MEMCPY_DEVICE_TO_HOST) != ACL_SUCCESS) {
-            throw std::runtime_error("device->host expert_token_nums copy failed");
-        }
+        if (skip_accuracy) {
+            ok = true;
+            PrintOrderedByRank(rank_id, world_size,
+                               "rank=" + std::to_string(rank_id) + " accuracy=SKIP\nPASS rank=" +
+                                   std::to_string(rank_id));
+        } else {
+            std::vector<uint16_t> actual_out(static_cast<size_t>(cfg.m) * cfg.k);
+            if (aclrtMemcpy(actual_out.data(), actual_out.size() * sizeof(uint16_t), out_dev.ptr,
+                            actual_out.size() * sizeof(uint16_t), ACL_MEMCPY_DEVICE_TO_HOST) != ACL_SUCCESS) {
+                throw std::runtime_error("device->host output copy failed");
+            }
+            std::vector<int32_t> expert_token_nums(cfg.expert_per_rank);
+            if (aclrtMemcpy(expert_token_nums.data(), expert_token_nums.size() * sizeof(int32_t),
+                            expert_token_nums_dev.ptr, expert_token_nums.size() * sizeof(int32_t),
+                            ACL_MEMCPY_DEVICE_TO_HOST) != ACL_SUCCESS) {
+                throw std::runtime_error("device->host expert_token_nums copy failed");
+            }
 
-        WriteBinaryFile(case_dir + "/output_rank" + std::to_string(rank_id) + ".bin",
-                        actual_out.data(), actual_out.size() * sizeof(uint16_t));
-        const AccuracyReport report = CompareFp16File(expected_out, actual_out, cfg.compare_atol, cfg.compare_rtol);
-        ok = report.pass;
-        std::string report_text = BuildAccuracyReportText(rank_id, report);
-        if (!ok) {
-            report_text += "\n" + BuildIntVectorText("expert_token_nums", expert_token_nums);
+            WriteBinaryFile(case_dir + "/output_rank" + std::to_string(rank_id) + ".bin",
+                            actual_out.data(), actual_out.size() * sizeof(uint16_t));
+            const AccuracyReport report = CompareFp16File(expected_out, actual_out, cfg.compare_atol, cfg.compare_rtol);
+            ok = report.pass;
+            std::string report_text = BuildAccuracyReportText(rank_id, report);
+            if (!ok) {
+                report_text += "\n" + BuildIntVectorText("expert_token_nums", expert_token_nums);
+            }
+            PrintOrderedByRank(rank_id, world_size, report_text + "\n" +
+                                                         (ok ? "PASS" : "FAIL") + std::string(" rank=") +
+                                                             std::to_string(rank_id));
         }
-        PrintOrderedByRank(rank_id, world_size, report_text + "\n" +
-                                                     (ok ? "PASS" : "FAIL") + std::string(" rank=") +
-                                                         std::to_string(rank_id));
     } catch (const std::exception &ex) {
         std::cerr << "rank=" << rank_id << " error: " << ex.what() << std::endl;
         ok = false;

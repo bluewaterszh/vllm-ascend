@@ -1,47 +1,30 @@
 #include "runtime_context.hpp"
 
+#include <algorithm>
+#include <cstdlib>
 #include <cstdint>
 #include <cstring>
+#include <iostream>
+#include <string>
+
+#include "hccl/hccl_tiling.h"
+#include "kernel_tiling.h"
 
 namespace {
 constexpr uint32_t COMM_IS_NOT_SET_DEVICE = 0;
 constexpr uint32_t COMM_TOPO_MESH = 0b1U;
 constexpr uint32_t GROUP_NAME_SIZE = 128U;
-constexpr uint32_t ALG_CONFIG_SIZE = 128U;
-constexpr uint32_t MAX_CC_TILING_NUM = 8U;
-constexpr int32_t RT_STREAM_PRIORITY_DEFAULT = 0;
 
-struct Mc2InitTilingInner {
-    uint32_t version = 0;
-    uint32_t mc2HcommCnt = 0;
-    uint32_t offset[MAX_CC_TILING_NUM] = {};
-    uint8_t debugMode = 0;
-    uint8_t preparePosition = 0;
-    uint16_t queueNum = 0;
-    uint16_t commBlockNum = 0;
-    uint8_t devType = 0;
-    char reserved[17] = {};
+struct StandaloneMc2TilingData {
+    Mc2InitTiling mc2InitTiling;
+    Mc2CcTiling mc2CcTiling;
 };
 
-struct Mc2cCTilingInner {
-    uint8_t skipLocalRankCopy = 0;
-    uint8_t skipBufferWindowCopy = 0;
-    uint8_t stepSize = 0;
-    uint8_t version = 0;
-    char reserved[9] = {};
-    uint8_t commEngine = 0;
-    uint8_t srcDataType = 0;
-    uint8_t dstDataType = 0;
-    char groupName[GROUP_NAME_SIZE] = {};
-    char algConfig[ALG_CONFIG_SIZE] = {};
-    uint32_t opType = 0;
-    uint32_t reduceType = 0;
-};
-
-struct Mc2CommConfigV2 {
-    Mc2InitTilingInner init{};
-    Mc2cCTilingInner inner{};
-};
+bool VerboseLogEnabled()
+{
+    const char *value = std::getenv("DISPATCH_FFN_COMBINE_V2_VERBOSE");
+    return value != nullptr && value[0] != '\0' && value[0] != '0';
+}
 
 bool LoadMeshContext(StandaloneRankRuntime &runtime, void *ctx_ptr)
 {
@@ -51,21 +34,37 @@ bool LoadMeshContext(StandaloneRankRuntime &runtime, void *ctx_ptr)
                        sizeof(runtime.hccl.host_ctx), ACL_MEMCPY_DEVICE_TO_HOST) == ACL_SUCCESS;
 }
 
-bool BuildWindowTable(StandaloneRankRuntime &runtime)
+void DumpMeshContextDebug(int rank_id, const HcclDeviceContext *device_ctx)
 {
-    runtime.window_table_host.assign(runtime.hccl.host_ctx.rankNum, 0);
-    for (uint32_t i = 0; i < runtime.hccl.host_ctx.rankNum; ++i) {
-        runtime.window_table_host[i] = runtime.hccl.host_ctx.windowsIn[i];
+    if (!VerboseLogEnabled()) {
+        return;
     }
 
-    const size_t bytes = runtime.window_table_host.size() * sizeof(uint64_t);
-    if (aclrtMalloc(&runtime.window_table_dev, bytes, ACL_MEM_MALLOC_HUGE_FIRST) != ACL_SUCCESS) {
-        runtime.window_table_dev = nullptr;
-        return false;
+    HcclDeviceContext debug_ctx{};
+    if (aclrtMemcpy(&debug_ctx, sizeof(debug_ctx), device_ctx, sizeof(debug_ctx), ACL_MEMCPY_DEVICE_TO_HOST) !=
+        ACL_SUCCESS) {
+        std::cerr << "rank=" << rank_id << " failed to copy HCCL debug context" << std::endl;
+        return;
     }
-    return aclrtMemcpy(runtime.window_table_dev, bytes, runtime.window_table_host.data(), bytes,
-                       ACL_MEMCPY_HOST_TO_DEVICE) == ACL_SUCCESS;
+
+    std::cerr << "rank=" << rank_id
+              << " hccl_ctx rankId=" << debug_ctx.rankId
+              << " rankNum=" << debug_ctx.rankNum
+              << " winSize=" << debug_ctx.winSize
+              << " workSpace=0x" << std::hex << debug_ctx.workSpace
+              << " workSpaceSize=" << std::dec << debug_ctx.workSpaceSize
+              << std::endl;
+    const uint32_t slots = std::min(debug_ctx.rankNum, HCCL_STANDALONE_MAX_RANK_NUM);
+    for (uint32_t i = 0; i < slots; ++i) {
+        std::cerr << "rank=" << rank_id
+                  << " hccl_ctx windowsIn[" << i << "]=0x" << std::hex
+                  << debug_ctx.windowsIn[i]
+                  << " windowsOut[" << i << "]=0x"
+                  << debug_ctx.windowsOut[i]
+                  << std::dec << std::endl;
+    }
 }
+
 } // namespace
 
 bool InitStandaloneRankRuntime(StandaloneRankRuntime &runtime, int rank_id, int world_size, const HcclRootInfo &root_info)
@@ -80,9 +79,7 @@ bool InitStandaloneRankRuntime(StandaloneRankRuntime &runtime, int rank_id, int 
     if (aclrtCreateStream(&runtime.compute_stream) != ACL_SUCCESS) {
         return false;
     }
-    if (rtStreamCreate(&runtime.hccl.hccl_stream, RT_STREAM_PRIORITY_DEFAULT) != 0) {
-        return false;
-    }
+    runtime.hccl.hccl_stream = reinterpret_cast<rtStream_t>(runtime.compute_stream);
     if (HcclCommInitRootInfo(static_cast<uint32_t>(world_size), &root_info, static_cast<uint32_t>(rank_id),
                              &runtime.hccl.comm) != HCCL_SUCCESS) {
         return false;
@@ -103,18 +100,14 @@ bool InitStandaloneRankRuntime(StandaloneRankRuntime &runtime, int rank_id, int 
         return false;
     }
 
-    Mc2CommConfigV2 tiling{};
-    tiling.init.version = 100U;
-    tiling.init.mc2HcommCnt = 1U;
-    tiling.init.commBlockNum = 48U;
-    tiling.init.devType = 4U;
-    tiling.init.offset[0] = static_cast<uint32_t>(reinterpret_cast<uint64_t>(&tiling.inner) -
-                                                  reinterpret_cast<uint64_t>(&tiling.init));
-    tiling.inner.opType = 18U;
-    tiling.inner.commEngine = 3U;
-    tiling.inner.version = 1U;
-    std::strncpy(tiling.inner.groupName, group, GROUP_NAME_SIZE - 1);
-    std::strncpy(tiling.inner.algConfig, "BatchWrite=level0:fullmesh", ALG_CONFIG_SIZE - 1);
+    StandaloneMc2TilingData tiling{};
+    const uint32_t op_type = 8U;
+    const std::string alg_config = "AlltoAll=level0:fullmesh;level1:pairwise";
+    AscendC::Mc2CcTilingConfig mc2_tiling_config(group, op_type, alg_config);
+    if (mc2_tiling_config.GetTiling(tiling.mc2InitTiling) != 0 ||
+        mc2_tiling_config.GetTiling(tiling.mc2CcTiling) != 0) {
+        return false;
+    }
 
     void *ctx_ptr = nullptr;
     if (HcclAllocComResourceByTiling(comm_handle, runtime.hccl.hccl_stream, &tiling, &ctx_ptr) != HCCL_SUCCESS ||
@@ -124,20 +117,23 @@ bool InitStandaloneRankRuntime(StandaloneRankRuntime &runtime, int rank_id, int 
     if (!LoadMeshContext(runtime, ctx_ptr)) {
         return false;
     }
-    return BuildWindowTable(runtime);
+    DumpMeshContextDebug(rank_id, runtime.hccl.device_ctx);
+    const uint32_t local_rank = static_cast<uint32_t>(rank_id);
+    return runtime.hccl.host_ctx.rankNum == static_cast<uint32_t>(world_size) &&
+           runtime.hccl.host_ctx.rankId == local_rank &&
+           runtime.hccl.host_ctx.winSize > 0 &&
+           local_rank < HCCL_STANDALONE_MAX_RANK_NUM &&
+           runtime.hccl.host_ctx.windowsIn[local_rank] != 0;
 }
 
 void DestroyStandaloneRankRuntime(StandaloneRankRuntime &runtime)
 {
-    if (runtime.window_table_dev != nullptr) {
-        aclrtFree(runtime.window_table_dev);
-        runtime.window_table_dev = nullptr;
-    }
     if (runtime.hccl.comm != nullptr) {
         HcclCommDestroy(runtime.hccl.comm);
         runtime.hccl.comm = nullptr;
     }
-    if (runtime.hccl.hccl_stream != nullptr) {
+    if (runtime.hccl.hccl_stream != nullptr &&
+        runtime.hccl.hccl_stream != reinterpret_cast<rtStream_t>(runtime.compute_stream)) {
         rtStreamDestroy(runtime.hccl.hccl_stream);
         runtime.hccl.hccl_stream = nullptr;
     }

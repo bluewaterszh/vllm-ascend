@@ -7,9 +7,11 @@
 
 #ifdef HCCL_COMM
 #include "moe_distribute_base.h"
+#include "../dispatch_ffn_combine_tiling.h"
 using namespace AscendC::HcclContextDef;
 
 #else
+#include "shmem_api.h"
 #endif
 
 #define FORCE_INLINE_AICORE inline __attribute__((always_inline)) __aicore__
@@ -84,23 +86,30 @@ class HcclShmem {
 public:
     #ifdef HCCL_COMM    // HCCL needs to initialize the HCCL context
         __gm__ HcclOpResParamCustom *WinContext_{nullptr};
+        __gm__ HcclA2CombineOpParam *A2Context_{nullptr};
         Hccl<HCCL_SERVER_TYPE_AICPU> hccl_;
         AscendC::LocalTensor<int32_t> ub;
         FORCE_INLINE_AICORE
         HcclShmem(){
-            m_rank = 0;
-            m_rankSize = 0;
-            m_segmentSize = 0;
+            auto contextGM0 = AscendC::GetHcclContext<HCCL_GROUP_ID_0>();
+            WinContext_ = (__gm__ HcclOpResParamCustom *)contextGM0;
+            A2Context_ = (__gm__ HcclA2CombineOpParam *)contextGM0;
+
+            m_rank = A2Context_->rankId;
+            m_rankSize = A2Context_->rankNum;
+            m_segmentSize = A2Context_->winSize;
         }
-        // Standalone (kernel-direct launch) path: there is no AICPU HCCL context,
-        // so peermem window bases are plumbed from tiling via a device window table.
+
         FORCE_INLINE_AICORE
-        void initShmem(GM_ADDR symmetricPtr_, size_t rank, size_t rankSize, size_t segmentSize) {
-            symmetricPtr = symmetricPtr_;
-            m_rank = static_cast<int32_t>(rank);
-            m_rankSize = static_cast<int32_t>(rankSize);
-            m_segmentSize = segmentSize;
-            useSymmetricTable_ = true;
+        void initHccl(__gm__ DispatchFFNCombineTilingData *tilingData) {
+            auto contextGM0 = AscendC::GetHcclContext<HCCL_GROUP_ID_0>();
+            WinContext_ = (__gm__ HcclOpResParamCustom *)contextGM0;
+            A2Context_ = (__gm__ HcclA2CombineOpParam *)contextGM0;
+            hccl_.Init(contextGM0, reinterpret_cast<__gm__ void *>(&tilingData->mc2InitTiling));
+            (void)hccl_.SetCcTiling(reinterpret_cast<__gm__ void *>(&tilingData->mc2CcTiling));
+            m_rank = A2Context_->rankId;
+            m_rankSize = A2Context_->rankNum;
+            m_segmentSize = A2Context_->winSize;
         }
     #else
         FORCE_INLINE_AICORE
@@ -108,64 +117,43 @@ public:
             m_segmentSize = SHMEM_MEM;
         }
         FORCE_INLINE_AICORE
-        void initShmem(GM_ADDR symmetricPtr_, size_t rank, size_t rankSize, size_t segmentSize) {
+        void initShmem(GM_ADDR symmetricPtr_, size_t rank, size_t rankSize) {
             symmetricPtr = symmetricPtr_;
-            m_rank = static_cast<int32_t>(rank);
-            m_rankSize = static_cast<int32_t>(rankSize);
-            m_segmentSize = segmentSize;
+            m_rank = rank;
+            m_rankSize = rankSize;
         }
     #endif
 
     FORCE_INLINE_AICORE
-    GM_ADDR WindowBase(GM_ADDR base, int32_t rankId) const {
-        auto windows = reinterpret_cast<__gm__ uint64_t *>(base);
-        return reinterpret_cast<GM_ADDR>(windows[rankId]);
-    }
-
-    FORCE_INLINE_AICORE
-    GM_ADDR operator() () const {   // No parameters: return pointer to local peermem
+    GM_ADDR operator() () {   // No parameters: return pointer to local peermem
         #ifdef HCCL_COMM
-            if (useSymmetricTable_) {
-                return WindowBase(symmetricPtr, m_rank);
-            }
-            return (GM_ADDR)(WinContext_->localWindowsIn);
+            return (GM_ADDR)(A2Context_->windowsIn[static_cast<uint32_t>(m_rank)]);
         #else
-            return WindowBase(symmetricPtr, m_rank);
+            return reinterpret_cast<GM_ADDR>(shmem_ptr(symmetricPtr, m_rank));
         #endif
     }
 
     FORCE_INLINE_AICORE
-    GM_ADDR operator() (int32_t index) const {  // With index parameter: return pointer to the base address of remote peermem
+    GM_ADDR operator() (int32_t index) {  // With index parameter: return pointer to the base address of remote peermem
         #ifdef HCCL_COMM
-            if (useSymmetricTable_) {
-                return WindowBase(symmetricPtr, index);
-            }
-            return (GM_ADDR)((index == m_rank) ? WinContext_->localWindowsIn :
-                                    ((HcclRankRelationResV2Custom *)(WinContext_->remoteRes[index].nextDevicePtr))->windowsIn);
+            return (GM_ADDR)(A2Context_->windowsIn[static_cast<uint32_t>(index)]);
         #else
-            return WindowBase(symmetricPtr, index);
+            return reinterpret_cast<GM_ADDR>(shmem_ptr(symmetricPtr, index));
         #endif
     }
 
     FORCE_INLINE_AICORE
-    GM_ADDR operator () (int64_t offset, int32_t rankId) const  {
+    GM_ADDR operator () (int64_t offset, int32_t rankId) {
         #ifdef HCCL_COMM
-            if (offset < 0 || offset >= static_cast<int64_t>(m_segmentSize)) {
+            if (offset < 0 || offset >= m_segmentSize) {
                 return nullptr;
             }
             if (rankId < 0 || rankId >= m_rankSize) {
                 return nullptr;
             }
-            if (useSymmetricTable_) {
-                return WindowBase(symmetricPtr, rankId) + offset;
-            }
-            return (GM_ADDR)((rankId == m_rank) ? WinContext_->localWindowsIn :
-                                    ((HcclRankRelationResV2Custom *)(WinContext_->remoteRes[rankId].nextDevicePtr))->windowsIn) + offset;
+            return (GM_ADDR)(A2Context_->windowsIn[static_cast<uint32_t>(rankId)]) + offset;
         #else
-            if (offset < 0 || offset >= static_cast<int64_t>(m_segmentSize) || rankId < 0 || rankId >= m_rankSize) {
-                return nullptr;
-            }
-            return WindowBase(symmetricPtr, rankId) + offset;
+            return reinterpret_cast<GM_ADDR>(shmem_ptr((symmetricPtr + offset), rankId));
         #endif
     }
 
@@ -344,7 +332,6 @@ private:
     size_t m_segmentSize;
     float sumTarget_{0.0};
     int32_t epStateValue_;
-    bool useSymmetricTable_{false};
 };
 
 

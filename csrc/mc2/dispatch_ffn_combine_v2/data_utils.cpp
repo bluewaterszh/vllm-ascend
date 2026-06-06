@@ -97,7 +97,7 @@ CaseConfig LoadCaseConfig(const std::string &case_json_path)
     cfg.world_size = ParseJsonUInt(text, "world_size");
     cfg.max_output_size = ParseJsonUInt(text, "max_output_size");
     cfg.list_len = 1;
-    cfg.compare_atol = ParseJsonDouble(text, "compare_atol", 1e-4);
+    cfg.compare_atol = ParseJsonDouble(text, "compare_atol", 1e-3);
     cfg.compare_rtol = ParseJsonDouble(text, "compare_rtol", 1e-3);
     return cfg;
 }

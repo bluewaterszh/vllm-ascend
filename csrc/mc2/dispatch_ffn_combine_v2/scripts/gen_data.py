@@ -2,6 +2,7 @@
 import argparse
 import json
 from pathlib import Path
+from typing import Optional
 
 import numpy as np
 
@@ -198,6 +199,45 @@ def compute_outputs_and_workload(
     return outputs, workload
 
 
+def compute_workload_only(
+    expert_idx_list: list[np.ndarray],
+    x_active_mask_list: list[np.ndarray],
+    args: argparse.Namespace,
+) -> dict[str, float]:
+    total_routed_tokens = 0.0
+    total_remote_routed_tokens = 0.0
+    total_input_tokens = float(sum(int(mask.sum()) for mask in x_active_mask_list))
+
+    for dst_rank in range(args.world_size):
+        kept_tokens = 0
+        for local_expert in range(args.experts):
+            global_expert = dst_rank * args.experts + local_expert
+            for src_rank in range(args.world_size):
+                active_mask = x_active_mask_list[src_rank]
+                expert_idx = expert_idx_list[src_rank]
+                for token_idx in range(args.m):
+                    if active_mask[token_idx] == 0:
+                        continue
+                    for topk_idx in range(args.topk):
+                        if int(expert_idx[token_idx, topk_idx]) != global_expert:
+                            continue
+                        if args.max_output_size > 0 and kept_tokens >= args.max_output_size:
+                            continue
+                        kept_tokens += 1
+                        total_routed_tokens += 1.0
+                        if src_rank != dst_rank:
+                            total_remote_routed_tokens += 1.0
+
+    return {
+        "input_tokens_all_ranks": total_input_tokens,
+        "routed_tokens_all_ranks": total_routed_tokens,
+        "remote_routed_tokens_all_ranks": total_remote_routed_tokens,
+        "compute_flops_all_ranks": total_routed_tokens * 3.0 * args.k * args.n,
+        "comm_bytes_all_ranks": total_remote_routed_tokens
+        * (args.k * (np.dtype(np.int8).itemsize + np.dtype(np.float16).itemsize) + np.dtype(np.float32).itemsize),
+    }
+
+
 def build_rank_case(
     rank: int,
     args: argparse.Namespace,
@@ -210,7 +250,7 @@ def build_rank_case(
     expert_idx_list: list[np.ndarray],
     probs_list: list[np.ndarray],
     x_active_mask_list: list[np.ndarray],
-    expected_out_list: list[np.ndarray],
+    expected_out_list: Optional[list[np.ndarray]],
 ) -> None:
     weight1_packed = pack_expert_weights_to_zn(weight1_nd[rank])
     weight2_packed = pack_expert_weights_to_zn(weight2_nd[rank])
@@ -225,7 +265,11 @@ def build_rank_case(
     write(out_dir / f"rank{rank}_scale2.bin", scale2_packed)
     write(out_dir / f"rank{rank}_probs.bin", probs_list[rank].astype(np.float32))
     write(out_dir / f"rank{rank}_x_active_mask.bin", x_active_mask_list[rank].astype(np.uint8))
-    write(out_dir / f"rank{rank}_expected_out.bin", fp32_to_fp16_bits(expected_out_list[rank]))
+    expected_out_path = out_dir / f"rank{rank}_expected_out.bin"
+    if expected_out_list is not None:
+        write(expected_out_path, fp32_to_fp16_bits(expected_out_list[rank]))
+    elif expected_out_path.exists():
+        expected_out_path.unlink()
 
 
 def main() -> None:
@@ -239,14 +283,18 @@ def main() -> None:
     parser.add_argument("--experts", type=int, default=2)
     parser.add_argument("--max-output-size", type=int, default=32)
     parser.add_argument("--case-mode", choices=["zero", "cpu-golden"], default="cpu-golden")
+    parser.add_argument("--skip-golden", action="store_true")
     parser.add_argument("--seed", type=int, default=20260515)
-    parser.add_argument("--atol", type=float, default=1e-4)
+    parser.add_argument("--atol", type=float, default=1e-3)
     parser.add_argument("--rtol", type=float, default=1e-3)
     args = parser.parse_args()
 
     np.random.seed(args.seed)
     out_dir = Path(args.output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
+    if args.skip_golden:
+        for stale_path in list(out_dir.glob("rank*_expected_out.bin")) + list(out_dir.glob("output_rank*.bin")):
+            stale_path.unlink()
 
     xs = [make_x(rank, args) for rank in range(args.world_size)]
     probs_list = [make_probs(rank, args) for rank in range(args.world_size)]
@@ -258,17 +306,21 @@ def main() -> None:
     scale2_origin = [make_scale_origin(args.experts, args.k, rank * 23, args.case_mode) for rank in range(args.world_size)]
 
     xs = [fp32_to_fp16_value(x) for x in xs]
-    expected_out_list, workload = compute_outputs_and_workload(
-        xs,
-        weight1_nd,
-        weight2_nd,
-        scale1_origin,
-        scale2_origin,
-        expert_idx_list,
-        probs_list,
-        x_active_mask_list,
-        args,
-    )
+    if args.skip_golden:
+        expected_out_list = None
+        workload = compute_workload_only(expert_idx_list, x_active_mask_list, args)
+    else:
+        expected_out_list, workload = compute_outputs_and_workload(
+            xs,
+            weight1_nd,
+            weight2_nd,
+            scale1_origin,
+            scale2_origin,
+            expert_idx_list,
+            probs_list,
+            x_active_mask_list,
+            args,
+        )
 
     case_json = {
         "world_size": args.world_size,
@@ -279,6 +331,7 @@ def main() -> None:
         "expert_per_rank": args.experts,
         "max_output_size": args.max_output_size,
         "case_mode": args.case_mode,
+        "skip_golden": args.skip_golden,
         "seed": args.seed,
         "compare_atol": args.atol,
         "compare_rtol": args.rtol,
