@@ -16,6 +16,7 @@ RTOL=1e-3
 WARMUP_ITERS=${DISPATCH_FFN_COMBINE_V2_WARMUP_ITERS:-3}
 MEASURE_ITERS=${DISPATCH_FFN_COMBINE_V2_MEASURE_ITERS:-5}
 SKIP_GOLDEN=${DISPATCH_FFN_COMBINE_V2_SKIP_GOLDEN:-0}
+STAGE_PROFILE=${DISPATCH_FFN_COMBINE_V2_STAGE_PROFILE:-0}
 
 if [[ -z "${ASCEND_HOME_PATH:-}" ]]; then
   if [[ -d /usr/local/Ascend/cann-8.5.0 ]]; then
@@ -59,6 +60,7 @@ while [[ $# -gt 0 ]]; do
     --warmup-iters) WARMUP_ITERS="$2"; shift 2 ;;
     --measure-iters) MEASURE_ITERS="$2"; shift 2 ;;
     --skip-golden) SKIP_GOLDEN=1; shift ;;
+    --stage-profile) STAGE_PROFILE=1; shift ;;
     *) echo "unknown option: $1"; exit 1 ;;
   esac
 done
@@ -133,4 +135,5 @@ export LD_LIBRARY_PATH="${BUILD_DIR}/lib:${LD_LIBRARY_PATH}"
 export DISPATCH_FFN_COMBINE_V2_CASE_DIR="${OUT_DIR}"
 export DISPATCH_FFN_COMBINE_V2_WARMUP_ITERS="${WARMUP_ITERS}"
 export DISPATCH_FFN_COMBINE_V2_MEASURE_ITERS="${MEASURE_ITERS}"
+export DISPATCH_FFN_COMBINE_V2_STAGE_PROFILE="${STAGE_PROFILE}"
 "${MPI_RUNNER}" -n "${WORLD_SIZE}" "${BUILD_DIR}/dispatch_ffn_combine_v2"

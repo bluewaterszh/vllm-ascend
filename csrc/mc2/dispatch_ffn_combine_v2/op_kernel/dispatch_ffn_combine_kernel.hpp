@@ -141,6 +141,7 @@ public:
         uint32_t epilogueCoreNum;
         uint32_t epilogueGranularity;
         optiling::MoeInitRoutingQuantV2TilingData moeInitRoutingQuantV2TilingData;
+        GM_ADDR profileEntryGM;
         //--------------
 
         // Methods
@@ -165,7 +166,8 @@ public:
             GM_ADDR ptrWorkspace_, GM_ADDR gmExpertTokenNums_, int32_t ubMoveNum_,
             GM_ADDR ptrXActiveMask_,
             GM_ADDR tilingGM_,
-            optiling::MoeInitRoutingQuantV2TilingData moeInitRoutingQuantV2TilingData_
+            optiling::MoeInitRoutingQuantV2TilingData moeInitRoutingQuantV2TilingData_,
+            GM_ADDR profileEntryGM_
         ) : problemShape(problemShape_),
             EP(EP_), listLen(listLen_), expertPerRank(expertPerRank_), maxOutputSize(maxOutputSize_),
             rank(rank_), rankSize(rankSize_), topK(topK_),
@@ -183,7 +185,8 @@ public:
             ptrWorkspace(ptrWorkspace_), ptrExpertTokenNums(gmExpertTokenNums_), ubMoveNum(ubMoveNum_),
             ptrXActiveMask(ptrXActiveMask_),
             tilingGM(tilingGM_),
-            moeInitRoutingQuantV2TilingData(moeInitRoutingQuantV2TilingData_)
+            moeInitRoutingQuantV2TilingData(moeInitRoutingQuantV2TilingData_),
+            profileEntryGM(profileEntryGM_)
         {
         }
     };
@@ -218,9 +221,13 @@ public:
     CATLASS_DEVICE
     void operator()<AscendC::AIC>(Params const &params)
     {
+        RecordStageStart(params, DISPATCH_FFN_COMBINE_PROFILE_STAGE_GMM1);
         GMM1(params);
+        RecordStageEnd(params, DISPATCH_FFN_COMBINE_PROFILE_STAGE_GMM1);
+        RecordStageStart(params, DISPATCH_FFN_COMBINE_PROFILE_STAGE_GMM2);
         AscendC::CrossCoreWaitFlag<0x2>(SYNCFLAGV2C);
         GMM2(params);
+        RecordStageEnd(params, DISPATCH_FFN_COMBINE_PROFILE_STAGE_GMM2);
     }
 
 
@@ -232,6 +239,25 @@ public:
     }
 
 private:
+    CATLASS_DEVICE void RecordProfile(Params const &params, uint32_t index) const
+    {
+        if (params.profileEntryGM != nullptr && index < DISPATCH_FFN_COMBINE_PROFILE_ENTRY_U64_COUNT) {
+            volatile __gm__ uint64_t *profileEntry =
+                reinterpret_cast<volatile __gm__ uint64_t *>(params.profileEntryGM);
+            profileEntry[index] = get_sys_cnt();
+        }
+    }
+
+    CATLASS_DEVICE void RecordStageStart(Params const &params, uint32_t stage) const
+    {
+        RecordProfile(params, DISPATCH_FFN_COMBINE_PROFILE_STAGE_BASE + stage * 2U);
+    }
+
+    CATLASS_DEVICE void RecordStageEnd(Params const &params, uint32_t stage) const
+    {
+        RecordProfile(params, DISPATCH_FFN_COMBINE_PROFILE_STAGE_BASE + stage * 2U + 1U);
+    }
+
     CATLASS_DEVICE void initBuffer(Params const &params) {
         #ifndef HCCL_COMM
             shmem.initShmem(params.symmetricPtr, params.rank, params.rankSize);
@@ -799,6 +825,7 @@ private:
         GM_ADDR localTokenPerExpert = shmem() + localTokenPerExpertOffset;     // Place the entire communication matrix in peermem
         uint32_t expandedRowIdxOffset = AlignUp(params.problemShape.m(), 256) * params.topK * sizeof(int32_t);
 
+        RecordStageStart(params, DISPATCH_FFN_COMBINE_PROFILE_STAGE_FRONT);
         ApplyXActiveMask(params);
 
         //---initRouting------
@@ -834,10 +861,12 @@ private:
         uint16_t syncgmm1Idx = 0;
         AscendC::CrossCoreSetFlag<0x2, PIPE_MTE3>(syncgmm1Idx / CROSS_CORE_FLAG_MAX_SET_COUNT);
         syncgmm1Idx++;
+        RecordStageEnd(params, DISPATCH_FFN_COMBINE_PROFILE_STAGE_FRONT);
 
         uint32_t prevGroupSum1 = 0, dequantSum1 = 0, dequantSum2 = 0;
         uint32_t dequantSum = 0;
 
+        RecordStageStart(params, DISPATCH_FFN_COMBINE_PROFILE_STAGE_DISPATCH);
         icache_preload(8);
         AscendC::SetFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID0);
         AscendC::SetFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID1);
@@ -891,6 +920,7 @@ private:
         }
         AscendC::WaitFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID0);
         AscendC::WaitFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID1);
+        RecordStageEnd(params, DISPATCH_FFN_COMBINE_PROFILE_STAGE_DISPATCH);
 
         uint32_t n2 = params.problemShape.k();
 
@@ -921,6 +951,7 @@ private:
         BlockEpilogue1 blockEpilogue1(resource, n);
 
         // Synchronous wait: SwiGLU waits for GMM1 [1]
+        RecordStageStart(params, DISPATCH_FFN_COMBINE_PROFILE_STAGE_SWIGLU);
         AscendC::CrossCoreWaitFlag<0x2>(SYNCFLAGC2V);
         AscendC::SyncAll<true>();
         if (dequantSum1 > 0) { 
@@ -956,6 +987,8 @@ private:
         }
 
         blockEpilogue1.Finalize();
+        RecordStageEnd(params, DISPATCH_FFN_COMBINE_PROFILE_STAGE_SWIGLU);
+        RecordStageStart(params, DISPATCH_FFN_COMBINE_PROFILE_STAGE_COMBINE);
         if (isCombineV1) {
             blockEpilogue2.SetFlag();
             CombineV1(params, blockEpilogue2);
@@ -963,9 +996,11 @@ private:
             blockEpilogue3.SetFlag();
             CombineV2(params, blockEpilogue3);
         }
+        RecordStageEnd(params, DISPATCH_FFN_COMBINE_PROFILE_STAGE_COMBINE);
 
         
         
+        RecordStageStart(params, DISPATCH_FFN_COMBINE_PROFILE_STAGE_UNPERMUTE);
         AscendC::SyncAll<true>();
         ResetTokenPerExpert(params.EP * paddedExpertNumAligned);
 
@@ -976,6 +1011,7 @@ private:
         KernelMoeTokenUnpermute<ElementD2, int32_t, float, true> kernelMoeTokenUnpermuteOp;
         kernelMoeTokenUnpermuteOp.Init(shmem() + peermemInfo.offsetD, workspaceInfo.expandedRowIdx, params.probs, reinterpret_cast<GM_ADDR>(params.ptrOutput), &tilingData);
         kernelMoeTokenUnpermuteOp.Process();
+        RecordStageEnd(params, DISPATCH_FFN_COMBINE_PROFILE_STAGE_UNPERMUTE);
     }
 
     CATLASS_DEVICE

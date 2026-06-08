@@ -5,12 +5,36 @@
 constexpr uint64_t DISPATCH_FFN_COMBINE_DEVICE_TILING_KEY = 1000010UL;
 constexpr uint64_t DISPATCH_FFN_COMBINE_STANDALONE_FUNC_KEY = 0UL;
 constexpr uint64_t DISPATCH_FFN_COMBINE_SYS_CNT_NS_PER_TICK = 20UL;
-constexpr uint32_t DISPATCH_FFN_COMBINE_PROFILE_ENTRY_BYTES = 64U;
+constexpr uint32_t DISPATCH_FFN_COMBINE_PROFILE_ENTRY_BYTES = 1024U;
 constexpr uint32_t DISPATCH_FFN_COMBINE_PROFILE_ENTRIES_PER_BLOCK = 3U;
 constexpr uint32_t DISPATCH_FFN_COMBINE_PROFILE_BYTES_PER_BLOCK =
     DISPATCH_FFN_COMBINE_PROFILE_ENTRY_BYTES * DISPATCH_FFN_COMBINE_PROFILE_ENTRIES_PER_BLOCK;
 constexpr uint32_t DISPATCH_FFN_COMBINE_PROFILE_KERNEL_START = 0U;
 constexpr uint32_t DISPATCH_FFN_COMBINE_PROFILE_KERNEL_END = 1U;
+constexpr uint32_t DISPATCH_FFN_COMBINE_PROFILE_STAGE_BASE = 2U;
+constexpr uint32_t DISPATCH_FFN_COMBINE_PROFILE_STAGE_COUNT = 7U;
+constexpr uint32_t DISPATCH_FFN_COMBINE_PROFILE_ENTRY_U64_COUNT =
+    DISPATCH_FFN_COMBINE_PROFILE_ENTRY_BYTES / sizeof(uint64_t);
+
+enum DispatchFFNCombineProfileStage : uint32_t {
+    DISPATCH_FFN_COMBINE_PROFILE_STAGE_FRONT = 0U,
+    DISPATCH_FFN_COMBINE_PROFILE_STAGE_DISPATCH = 1U,
+    DISPATCH_FFN_COMBINE_PROFILE_STAGE_GMM1 = 2U,
+    DISPATCH_FFN_COMBINE_PROFILE_STAGE_SWIGLU = 3U,
+    DISPATCH_FFN_COMBINE_PROFILE_STAGE_GMM2 = 4U,
+    DISPATCH_FFN_COMBINE_PROFILE_STAGE_COMBINE = 5U,
+    DISPATCH_FFN_COMBINE_PROFILE_STAGE_UNPERMUTE = 6U,
+};
+
+constexpr uint32_t DispatchFFNCombineProfileStageStartIndex(uint32_t stage)
+{
+    return DISPATCH_FFN_COMBINE_PROFILE_STAGE_BASE + stage * 2U;
+}
+
+constexpr uint32_t DispatchFFNCombineProfileStageEndIndex(uint32_t stage)
+{
+    return DispatchFFNCombineProfileStageStartIndex(stage) + 1U;
+}
 
 struct DispatchFFNCombineLaunchArgs {
     void *x = nullptr;
@@ -27,6 +51,7 @@ struct DispatchFFNCombineLaunchArgs {
     void *tiling = nullptr;
     void *profile_data = nullptr;
     uint32_t block_dim = 1;
+    uint32_t stage_profile = 0;
     uint64_t func_key = DISPATCH_FFN_COMBINE_STANDALONE_FUNC_KEY;
 };
 

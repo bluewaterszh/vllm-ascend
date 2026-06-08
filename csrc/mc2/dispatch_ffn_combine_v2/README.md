@@ -10,6 +10,7 @@ This directory contains a standalone multi-rank runner for the int8
 - Tensor-list wrapping for `weight1`, `weight2`, `scale1`, and `scale2`.
 - FP16 accuracy report with `max_diff`, `max_ratio`, and allowed error count.
 - Warmup and measured timing: kernel uses device `get_sys_cnt()` envelope, e2e uses host timing.
+- Optional per-core stage profile using device `get_sys_cnt()` for the final measured iteration.
 - Optional `--skip-golden` mode for large cases: skip CPU golden generation and final output compare.
 
 Current device tiling key is `1000010`; standalone direct-launch function key is `0`.
@@ -95,6 +96,17 @@ For large `max-output-size * K`, `run.sh` raises `HCCL_BUFFSIZE` automatically
 when the default 200 MB window is too small for the standalone remote-window
 layout.
 
+For detailed per-core stage timing, add `--stage-profile` or export
+`DISPATCH_FFN_COMBINE_V2_STAGE_PROFILE=1`. The report is printed once per rank
+from the final measured iteration and includes the stages `front`, `dispatch`,
+`gmm1`, `swiglu`, `gmm2`, `combine`, and `unpermute`.
+
+The profile stages follow the MC2 dataflow boundaries: `front` covers local
+front reorder plus token-count/cumsum metadata preparation before remote data
+gather starts; `dispatch` covers remote reordered-token gather into the local
+GMM1 input; `combine` covers expert output write-back; `unpermute` covers the
+post-combine synchronization/reset and final output reconstruction.
+
 `run.sh` keeps Ascend/HCCL logs quiet by default. Set
 `DISPATCH_FFN_COMBINE_V2_VERBOSE=1` when host-side HCCL context and tiling
 diagnostics are needed.
@@ -125,6 +137,7 @@ Useful run overrides:
 - `--warmup-iters 3`
 - `--measure-iters 5`
 - `--skip-golden`
+- `--stage-profile`
 
 ## Generated Artifacts
 

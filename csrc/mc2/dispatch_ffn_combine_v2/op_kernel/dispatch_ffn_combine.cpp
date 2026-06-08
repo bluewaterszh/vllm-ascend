@@ -24,7 +24,8 @@
 using namespace AscendC;
 using namespace DispatchFFNCombineImpl;
 extern "C" __global__ __aicore__ void dispatch_ffn_combine(GM_ADDR x, GM_ADDR w1, GM_ADDR w2,  GM_ADDR expertId, GM_ADDR scale1, GM_ADDR scale2, GM_ADDR probs,
-    GM_ADDR xActiveMask, GM_ADDR c, GM_ADDR expertTokenNums, GM_ADDR workspaceGM,  GM_ADDR tilingGM, GM_ADDR profileGM)
+    GM_ADDR xActiveMask, GM_ADDR c, GM_ADDR expertTokenNums, GM_ADDR workspaceGM,  GM_ADDR tilingGM, GM_ADDR profileGM,
+    uint32_t stageProfile)
 {
     uint64_t tStart = get_sys_cnt();
     __gm__ uint64_t *profileEntry = nullptr;
@@ -44,7 +45,8 @@ extern "C" __global__ __aicore__ void dispatch_ffn_combine(GM_ADDR x, GM_ADDR w1
     if (TILING_KEY_IS(DISPATCH_FFN_COMBINE_DEVICE_TILING_KEY)) {
         KERNEL_TASK_TYPE(DISPATCH_FFN_COMBINE_DEVICE_TILING_KEY, KERNEL_TYPE_MIX_AIC_1_2);
         DispatchFFNCombine<int8_t, DTYPE_W1, DTYPE_OUT, false, true> op;
-        op.Init(x, w1, w2, expertId, scale1, scale2, probs, xActiveMask, c, expertTokenNums, workspaceGM, tilingGM);
+        op.Init(x, w1, w2, expertId, scale1, scale2, probs, xActiveMask, c, expertTokenNums, workspaceGM,
+                tilingGM, stageProfile != 0U ? reinterpret_cast<GM_ADDR>(profileEntry) : nullptr);
         op.Process();
     }
 
@@ -82,6 +84,7 @@ uint32_t launchDispatchFFNCombine(const DispatchFFNCombineLaunchArgs &args, void
         alignas(((alignof(void*) + 3) >> 2) << 2) void *workspaceGM;
         alignas(((alignof(void*) + 3) >> 2) << 2) void *tilingGM;
         alignas(((alignof(void*) + 3) >> 2) << 2) void *profileGM;
+        alignas(((alignof(uint32_t) + 3) >> 2) << 2) uint32_t stageProfile;
         alignas(((alignof(void*) + 3) >> 2) << 2) void *__ascendc_overflow;
     } kernel_args{};
 
@@ -110,6 +113,7 @@ uint32_t launchDispatchFFNCombine(const DispatchFFNCombineLaunchArgs &args, void
     kernel_args.workspaceGM = args.workspace;
     kernel_args.tilingGM = args.tiling;
     kernel_args.profileGM = args.profile_data;
+    kernel_args.stageProfile = args.stage_profile;
 
     ret = launch_and_profiling_dispatch_ffn_combine(args.func_key, args.block_dim, stream,
                                                     reinterpret_cast<void **>(&kernel_args), sizeof(kernel_args));
@@ -129,7 +133,8 @@ uint32_t launchDispatchFFNCombine(const DispatchFFNCombineLaunchArgs &args, void
         reinterpret_cast<GM_ADDR>(args.expert_token_nums),
         reinterpret_cast<GM_ADDR>(args.workspace),
         reinterpret_cast<GM_ADDR>(args.tiling),
-        reinterpret_cast<GM_ADDR>(args.profile_data));
+        reinterpret_cast<GM_ADDR>(args.profile_data),
+        args.stage_profile);
     return 0;
 #endif
 }

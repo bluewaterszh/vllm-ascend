@@ -22,6 +22,7 @@ set(ASCEND_HOME_PATH $ENV{ASCEND_HOME_PATH})
 set(ASCEND_CANN_PACKAGE_PATH ${ASCEND_HOME_PATH})
 set(CATLASS_INCLUDE ${CMAKE_CURRENT_SOURCE_DIR}/../../third_party/catlass/include)
 set(SOC_VERSION "ascend910_93" CACHE STRING "Ascend SoC version")
+set(DISPATCH_FFN_COMBINE_REQUESTED_SOC_VERSION "${SOC_VERSION}")
 set(DISPATCH_FFN_COMBINE_TILING_KEY "1000010" CACHE STRING "Standalone dispatch_ffn_combine tiling key")
 
 if(SOC_VERSION STREQUAL "ascend910_93")
@@ -111,6 +112,10 @@ add_executable(dispatch_ffn_combine_v2
 )
 
 target_compile_options(dispatch_ffn_combine_v2 PRIVATE ${CMAKE_CPP_COMPILE_OPTIONS})
+target_compile_definitions(dispatch_ffn_combine_v2 PRIVATE
+    DISPATCH_FFN_COMBINE_V2_REQUESTED_SOC_VERSION="${DISPATCH_FFN_COMBINE_REQUESTED_SOC_VERSION}"
+    DISPATCH_FFN_COMBINE_V2_COMPILE_SOC_VERSION="${SOC_VERSION}"
+)
 
 target_include_directories(dispatch_ffn_combine_v2 PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}

@@ -5,6 +5,7 @@
 #include <iostream>
 #include <stdexcept>
 #include <string>
+#include <vector>
 
 #include "kernel_launch.hpp"
 #include "moe_init_routing_quant_v2/moe_init_routing_quant_v2_tiling.h"
@@ -12,13 +13,137 @@
 
 namespace {
 constexpr uint32_t SYSTEM_NEED_WORKSPACE = 16U * 1024U * 1024U;
+constexpr uint32_t DEFAULT_AIV_NUM = 20U;
+constexpr uint64_t DEFAULT_UB_SIZE = 196352U;
 constexpr uint64_t MIB = 1024U * 1024U;
 constexpr uint64_t HCCL_WINDOW_RESERVED_BYTES = 3U * MIB;
+
+#ifndef DISPATCH_FFN_COMBINE_V2_REQUESTED_SOC_VERSION
+#define DISPATCH_FFN_COMBINE_V2_REQUESTED_SOC_VERSION "ascend910_93"
+#endif
+
+#ifndef DISPATCH_FFN_COMBINE_V2_COMPILE_SOC_VERSION
+#define DISPATCH_FFN_COMBINE_V2_COMPILE_SOC_VERSION "ascend910_9391"
+#endif
+
+struct PlatformCoreInfo {
+    uint32_t aiv_num = DEFAULT_AIV_NUM;
+    uint64_t ub_size = DEFAULT_UB_SIZE;
+    std::string soc_version = "constant-default";
+    bool from_fallback = false;
+};
 
 bool VerboseLogEnabled()
 {
     const char *value = std::getenv("DISPATCH_FFN_COMBINE_V2_VERBOSE");
     return value != nullptr && value[0] != '\0' && value[0] != '0';
+}
+
+bool ShouldLogFallback(int rank_id)
+{
+    return rank_id == 0 || VerboseLogEnabled();
+}
+
+bool StartsWith(const std::string &value, const std::string &prefix)
+{
+    return value.size() >= prefix.size() &&
+           value.compare(0, prefix.size(), prefix) == 0;
+}
+
+std::string CanonicalSocName(const std::string &soc)
+{
+    if (soc == "ascend910_93") {
+        return "Ascend910_93";
+    }
+    if (StartsWith(soc, "ascend910_")) {
+        return "Ascend910_" + soc.substr(std::string("ascend910_").size());
+    }
+    if (soc == "ascend910b") {
+        return "Ascend910B";
+    }
+    if (StartsWith(soc, "ascend910b")) {
+        return "Ascend910B" + soc.substr(std::string("ascend910b").size());
+    }
+    return soc;
+}
+
+void AddSocCandidate(std::vector<std::string> &candidates, const std::string &soc)
+{
+    const std::string canonical = CanonicalSocName(soc);
+    if (canonical.empty()) {
+        return;
+    }
+    if (std::find(candidates.begin(), candidates.end(), canonical) == candidates.end()) {
+        candidates.push_back(canonical);
+    }
+}
+
+std::vector<std::string> BuildSocCandidates()
+{
+    std::vector<std::string> candidates;
+    AddSocCandidate(candidates, DISPATCH_FFN_COMBINE_V2_REQUESTED_SOC_VERSION);
+    AddSocCandidate(candidates, DISPATCH_FFN_COMBINE_V2_COMPILE_SOC_VERSION);
+    AddSocCandidate(candidates, "Ascend910B1");
+    AddSocCandidate(candidates, "Ascend910_93");
+    return candidates;
+}
+
+bool TryGetPlatformCoreInfo(const std::string &soc_version, PlatformCoreInfo &info)
+{
+    auto *platform = platform_ascendc::PlatformAscendCManager::GetInstance(soc_version.c_str());
+    if (platform == nullptr) {
+        return false;
+    }
+    const uint32_t aiv_num = platform->GetCoreNumAiv();
+    if (aiv_num == 0) {
+        return false;
+    }
+
+    uint64_t ub_size = 0;
+    platform->GetCoreMemSize(platform_ascendc::CoreMemType::UB, ub_size);
+    info.aiv_num = aiv_num;
+    info.ub_size = ub_size == 0 ? DEFAULT_UB_SIZE : ub_size;
+    info.soc_version = soc_version;
+    return true;
+}
+
+PlatformCoreInfo ResolvePlatformCoreInfo(int rank_id)
+{
+    const std::vector<std::string> candidates = BuildSocCandidates();
+    const std::string requested_soc = CanonicalSocName(DISPATCH_FFN_COMBINE_V2_REQUESTED_SOC_VERSION);
+    for (size_t idx = 0; idx < candidates.size(); ++idx) {
+        PlatformCoreInfo info;
+        if (TryGetPlatformCoreInfo(candidates[idx], info)) {
+            info.from_fallback = idx != 0;
+            if (info.from_fallback && ShouldLogFallback(rank_id)) {
+                std::cerr << "rank=" << rank_id
+                          << " platform fallback: requestedSoc=" << requested_soc
+                          << " resolvedSoc=" << info.soc_version
+                          << " aivNum=" << info.aiv_num
+                          << " ubSize=" << info.ub_size
+                          << std::endl;
+            }
+            return info;
+        }
+        if (ShouldLogFallback(rank_id)) {
+            std::cerr << "rank=" << rank_id
+                      << " platform query failed: requestedSoc=" << requested_soc
+                      << " candidateSoc=" << candidates[idx]
+                      << std::endl;
+        }
+    }
+
+    PlatformCoreInfo info;
+    info.from_fallback = true;
+    if (ShouldLogFallback(rank_id)) {
+        std::cerr << "rank=" << rank_id
+                  << " platform fallback: requestedSoc=" << requested_soc
+                  << " resolvedSoc=constant-default"
+                  << " aivNum=" << info.aiv_num
+                  << " ubSize=" << info.ub_size
+                  << std::endl;
+    }
+    return info;
 }
 
 uint64_t AlignUp(uint64_t value, uint64_t align)
@@ -89,15 +214,6 @@ uint64_t FillInitRoutingTiling(CoCTiling &coc, const CaseConfig &cfg)
     return static_cast<uint64_t>(tilingBase.workspaceSize_);
 }
 
-uint32_t GetAivNum()
-{
-    auto *platform = platform_ascendc::PlatformAscendCManager::GetInstance("Ascend910_93");
-    if (platform == nullptr) {
-        return 20;
-    }
-    return platform->GetCoreNumAiv();
-}
-
 uint32_t GetBlockDim(uint32_t aivNum)
 {
     // The generated direct-launch wrapper already packs the AIC/AIV mix task.
@@ -122,8 +238,9 @@ DispatchFFNCombineBuildResult BuildDispatchFFNCombineTiling(const CaseConfig &cf
     info.isTransposeB = 0;
     info.isWeightNz = 1;
     info.listLen = cfg.list_len;
-    info.aivNum = GetAivNum();
-    info.totalUbSize = 196352;
+    const PlatformCoreInfo platform_info = ResolvePlatformCoreInfo(runtime.hccl.rank_id);
+    info.aivNum = platform_info.aiv_num;
+    info.totalUbSize = static_cast<uint32_t>(platform_info.ub_size);
 
     RequireHcclWindowCapacity(cfg, runtime);
     FillCoCTiling(result.tiling.cocTiling, cfg);

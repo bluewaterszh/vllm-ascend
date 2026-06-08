@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cstdlib>
 #include <cstdint>
@@ -212,7 +213,57 @@ double SysCntTicksToUs(uint64_t ticks)
     return static_cast<double>(ticks) * static_cast<double>(DISPATCH_FFN_COMBINE_SYS_CNT_NS_PER_TICK) / 1000.0;
 }
 
-double ReadKernelProfileUs(const DeviceBuffer &profile_dev, uint32_t block_dim)
+const char *StageProfileName(uint32_t stage)
+{
+    static constexpr const char *kNames[DISPATCH_FFN_COMBINE_PROFILE_STAGE_COUNT] = {
+        "front", "dispatch", "gmm1", "swiglu", "gmm2", "combine", "unpermute"};
+    return stage < DISPATCH_FFN_COMBINE_PROFILE_STAGE_COUNT ? kNames[stage] : "unknown";
+}
+
+const char *ProfileEntryKind(uint32_t profile_idx)
+{
+    return profile_idx == 0U ? "aic" : "aiv";
+}
+
+uint32_t ProfileEntrySubblock(uint32_t profile_idx)
+{
+    return profile_idx == 0U ? 0U : profile_idx - 1U;
+}
+
+bool StageProfileEntryParticipates(uint32_t stage, uint32_t profile_idx)
+{
+    const bool is_aic = profile_idx == 0U;
+    switch (stage) {
+        case DISPATCH_FFN_COMBINE_PROFILE_STAGE_GMM1:
+        case DISPATCH_FFN_COMBINE_PROFILE_STAGE_GMM2:
+            return is_aic;
+        case DISPATCH_FFN_COMBINE_PROFILE_STAGE_FRONT:
+        case DISPATCH_FFN_COMBINE_PROFILE_STAGE_DISPATCH:
+        case DISPATCH_FFN_COMBINE_PROFILE_STAGE_SWIGLU:
+        case DISPATCH_FFN_COMBINE_PROFILE_STAGE_COMBINE:
+        case DISPATCH_FFN_COMBINE_PROFILE_STAGE_UNPERMUTE:
+            return !is_aic;
+        default:
+            return false;
+    }
+}
+
+struct StageProfileEnvelope {
+    bool valid = false;
+    uint32_t active_entries = 0;
+    uint64_t start_min = 0;
+    uint64_t end_max = 0;
+    uint64_t max_core_ticks = 0;
+};
+
+bool ProfileIntervalValid(const uint64_t *entry, uint32_t stage)
+{
+    const uint64_t start = entry[DispatchFFNCombineProfileStageStartIndex(stage)];
+    const uint64_t end = entry[DispatchFFNCombineProfileStageEndIndex(stage)];
+    return start != 0U && end != 0U && end >= start;
+}
+
+double ReadKernelProfileUs(const DeviceBuffer &profile_dev, uint32_t block_dim, std::vector<uint8_t> *profile_host = nullptr)
 {
     if (profile_dev.bytes == 0 || block_dim == 0) {
         return 0.0;
@@ -222,6 +273,9 @@ double ReadKernelProfileUs(const DeviceBuffer &profile_dev, uint32_t block_dim)
     if (aclrtMemcpy(profile.data(), profile.size(), profile_dev.ptr, profile_dev.bytes,
                     ACL_MEMCPY_DEVICE_TO_HOST) != ACL_SUCCESS) {
         throw std::runtime_error("device->host profile copy failed");
+    }
+    if (profile_host != nullptr) {
+        *profile_host = profile;
     }
 
     uint64_t start_min = std::numeric_limits<uint64_t>::max();
@@ -245,6 +299,114 @@ double ReadKernelProfileUs(const DeviceBuffer &profile_dev, uint32_t block_dim)
         return 0.0;
     }
     return SysCntTicksToUs(end_max - start_min);
+}
+
+std::string BuildStageProfileReportText(int rank_id, const std::vector<uint8_t> &profile, uint32_t block_dim)
+{
+    std::ostringstream os;
+    os << std::fixed << std::setprecision(2);
+    if (profile.empty() || block_dim == 0) {
+        os << "rank=" << rank_id << " stageProfile EMPTY";
+        return os.str();
+    }
+
+    uint64_t kernel_start_min = std::numeric_limits<uint64_t>::max();
+    uint64_t kernel_end_max = 0;
+    std::array<StageProfileEnvelope, DISPATCH_FFN_COMBINE_PROFILE_STAGE_COUNT> envelopes{};
+
+    for (uint32_t block = 0; block < block_dim; ++block) {
+        for (uint32_t profile_idx = 0; profile_idx < DISPATCH_FFN_COMBINE_PROFILE_ENTRIES_PER_BLOCK; ++profile_idx) {
+            const size_t offset =
+                static_cast<size_t>(block) * DISPATCH_FFN_COMBINE_PROFILE_BYTES_PER_BLOCK +
+                static_cast<size_t>(profile_idx) * DISPATCH_FFN_COMBINE_PROFILE_ENTRY_BYTES;
+            const uint64_t *entry = reinterpret_cast<const uint64_t *>(profile.data() + offset);
+            const uint64_t kernel_start = entry[DISPATCH_FFN_COMBINE_PROFILE_KERNEL_START];
+            const uint64_t kernel_end = entry[DISPATCH_FFN_COMBINE_PROFILE_KERNEL_END];
+            if (kernel_start == 0U && kernel_end == 0U) {
+                continue;
+            }
+            kernel_start_min = std::min(kernel_start_min, kernel_start);
+            kernel_end_max = std::max(kernel_end_max, kernel_end);
+
+            for (uint32_t stage = 0; stage < DISPATCH_FFN_COMBINE_PROFILE_STAGE_COUNT; ++stage) {
+                if (!StageProfileEntryParticipates(stage, profile_idx) || !ProfileIntervalValid(entry, stage)) {
+                    continue;
+                }
+                const uint64_t start = entry[DispatchFFNCombineProfileStageStartIndex(stage)];
+                const uint64_t end = entry[DispatchFFNCombineProfileStageEndIndex(stage)];
+                StageProfileEnvelope &env = envelopes[stage];
+                if (!env.valid) {
+                    env.valid = true;
+                    env.start_min = start;
+                    env.end_max = end;
+                } else {
+                    env.start_min = std::min(env.start_min, start);
+                    env.end_max = std::max(env.end_max, end);
+                }
+                env.active_entries += 1U;
+                env.max_core_ticks = std::max(env.max_core_ticks, end - start);
+            }
+        }
+    }
+
+    if (kernel_start_min == std::numeric_limits<uint64_t>::max()) {
+        os << "rank=" << rank_id << " stageProfile EMPTY";
+        return os.str();
+    }
+
+    os << "rank=" << rank_id << " stageProfileEnvelope base=syscnt_min_kernel_start participant_cores_only=1"
+       << " kernel_us=" << SysCntTicksToUs(kernel_end_max - kernel_start_min) << '\n';
+    for (uint32_t stage = 0; stage < DISPATCH_FFN_COMBINE_PROFILE_STAGE_COUNT; ++stage) {
+        const StageProfileEnvelope &env = envelopes[stage];
+        os << "  " << StageProfileName(stage);
+        if (!env.valid) {
+            os << " inactive\n";
+            continue;
+        }
+        os << " active=" << env.active_entries
+           << " start_us=" << SysCntTicksToUs(env.start_min - kernel_start_min)
+           << " end_us=" << SysCntTicksToUs(env.end_max - kernel_start_min)
+           << " envelope_us=" << SysCntTicksToUs(env.end_max - env.start_min)
+           << " max_core_us=" << SysCntTicksToUs(env.max_core_ticks) << '\n';
+    }
+
+    os << "rank=" << rank_id << " stageProfileCore\n";
+    for (uint32_t block = 0; block < block_dim; ++block) {
+        for (uint32_t profile_idx = 0; profile_idx < DISPATCH_FFN_COMBINE_PROFILE_ENTRIES_PER_BLOCK; ++profile_idx) {
+            const size_t offset =
+                static_cast<size_t>(block) * DISPATCH_FFN_COMBINE_PROFILE_BYTES_PER_BLOCK +
+                static_cast<size_t>(profile_idx) * DISPATCH_FFN_COMBINE_PROFILE_ENTRY_BYTES;
+            const uint64_t *entry = reinterpret_cast<const uint64_t *>(profile.data() + offset);
+            const uint64_t kernel_start = entry[DISPATCH_FFN_COMBINE_PROFILE_KERNEL_START];
+            const uint64_t kernel_end = entry[DISPATCH_FFN_COMBINE_PROFILE_KERNEL_END];
+            if (kernel_start == 0U && kernel_end == 0U) {
+                continue;
+            }
+            os << "  " << ProfileEntryKind(profile_idx) << " block=" << block;
+            if (profile_idx != 0U) {
+                os << " sub=" << ProfileEntrySubblock(profile_idx);
+            }
+            if (kernel_end >= kernel_start) {
+                os << " kernel=(" << SysCntTicksToUs(kernel_start - kernel_start_min) << ','
+                   << SysCntTicksToUs(kernel_end - kernel_start_min) << ','
+                   << SysCntTicksToUs(kernel_end - kernel_start) << ')';
+            }
+            for (uint32_t stage = 0; stage < DISPATCH_FFN_COMBINE_PROFILE_STAGE_COUNT; ++stage) {
+                os << ' ' << StageProfileName(stage) << '=';
+                if (!ProfileIntervalValid(entry, stage)) {
+                    os << '-';
+                    continue;
+                }
+                const uint64_t start = entry[DispatchFFNCombineProfileStageStartIndex(stage)];
+                const uint64_t end = entry[DispatchFFNCombineProfileStageEndIndex(stage)];
+                os << '(' << SysCntTicksToUs(start - kernel_start_min) << ','
+                   << SysCntTicksToUs(end - kernel_start_min) << ','
+                   << SysCntTicksToUs(end - start) << ')';
+            }
+            os << '\n';
+        }
+    }
+    return os.str();
 }
 
 std::vector<double> GatherMaxSamplesToRoot(const std::vector<double> &local_samples,
@@ -316,6 +478,7 @@ bool RunOneRank(int rank_id, int world_size, const std::string &case_dir, const 
         const int warmup_iters = ParseEnvInt("DISPATCH_FFN_COMBINE_V2_WARMUP_ITERS", kDefaultWarmupIters);
         const int measure_iters = ParseEnvInt("DISPATCH_FFN_COMBINE_V2_MEASURE_ITERS", kDefaultMeasureIters);
         const bool skip_accuracy = ParseEnvInt("DISPATCH_FFN_COMBINE_V2_SKIP_ACCURACY", 0) != 0;
+        const bool stage_profile = ParseEnvInt("DISPATCH_FFN_COMBINE_V2_STAGE_PROFILE", 0) != 0;
         if (warmup_iters < 0 || measure_iters < 0) {
             throw std::runtime_error("warmup/measure iters must be non-negative");
         }
@@ -376,6 +539,7 @@ bool RunOneRank(int rank_id, int world_size, const std::string &case_dir, const 
         args.out = out_dev.ptr;
         args.expert_token_nums = expert_token_nums_dev.ptr;
         args.profile_data = profile_dev.ptr;
+        args.stage_profile = stage_profile ? 1U : 0U;
 
         auto launch_once = [&]() {
             const uint32_t launch_ret = launchDispatchFFNCombine(args, runtime.compute_stream);
@@ -389,6 +553,7 @@ bool RunOneRank(int rank_id, int world_size, const std::string &case_dir, const 
         std::vector<double> e2e_times_us;
         kernel_times_us.reserve(static_cast<size_t>(measure_iters));
         e2e_times_us.reserve(static_cast<size_t>(measure_iters));
+        std::vector<uint8_t> last_profile_host;
 
         CommMpiBarrier();
         for (int iter = 0; iter < warmup_iters; ++iter) {
@@ -410,7 +575,12 @@ bool RunOneRank(int rank_id, int world_size, const std::string &case_dir, const 
             CommMpiBarrier();
             const auto host_end = std::chrono::high_resolution_clock::now();
 
-            kernel_times_us.push_back(ReadKernelProfileUs(profile_dev, build.block_dim));
+            std::vector<uint8_t> profile_host;
+            kernel_times_us.push_back(ReadKernelProfileUs(profile_dev, build.block_dim,
+                                                          stage_profile ? &profile_host : nullptr));
+            if (stage_profile) {
+                last_profile_host = std::move(profile_host);
+            }
             e2e_times_us.push_back(std::chrono::duration<double, std::micro>(host_end - host_start).count());
         }
 
@@ -418,6 +588,15 @@ bool RunOneRank(int rank_id, int world_size, const std::string &case_dir, const 
         const std::vector<double> e2e_max_samples = GatherMaxSamplesToRoot(e2e_times_us, rank_id, world_size);
         if (rank_id == 0) {
             PrintPerfSummary(warmup_iters, measure_iters, kernel_max_samples, e2e_max_samples);
+        }
+        if (stage_profile) {
+            if (measure_iters > 0) {
+                PrintOrderedByRank(rank_id, world_size,
+                                   BuildStageProfileReportText(rank_id, last_profile_host, build.block_dim));
+            } else {
+                PrintOrderedByRank(rank_id, world_size,
+                                   "rank=" + std::to_string(rank_id) + " stageProfile EMPTY measure_iters=0");
+            }
         }
 
         PrepareIterationState(runtime, out_dev, expert_token_nums_dev, workspace_dev, profile_dev);
