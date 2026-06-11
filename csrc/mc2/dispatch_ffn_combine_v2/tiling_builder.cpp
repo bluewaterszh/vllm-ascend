@@ -13,7 +13,7 @@
 
 namespace {
 constexpr uint32_t SYSTEM_NEED_WORKSPACE = 16U * 1024U * 1024U;
-constexpr uint32_t DEFAULT_AIV_NUM = 20U;
+constexpr uint32_t DEFAULT_AIV_NUM = 24U;
 constexpr uint64_t DEFAULT_UB_SIZE = 196352U;
 constexpr uint64_t MIB = 1024U * 1024U;
 constexpr uint64_t HCCL_WINDOW_RESERVED_BYTES = 3U * MIB;
@@ -203,7 +203,7 @@ uint64_t FillInitRoutingTiling(CoCTiling &coc, const CaseConfig &cfg)
     const int64_t expertTokensCountOrCumsumFlag = 2;
     const bool expertTokensBeforeCapacityFlag = false;
     const int64_t quantMode = 1;
-    const int64_t aivNumInitRouting = 40;
+    const int64_t aivNumInitRouting = 48;
     if (!tilingBase.DoTiling(cfg.m, cfg.k, cfg.topk, expertCapacity, expertNum, activeNum, dropPadMode,
                              expertTokensCountOrCumsumFlag, expertTokensBeforeCapacityFlag, inputXDtypeSize, quantMode,
                              scaleDim0, aivNumInitRouting, ubSize)) {
@@ -218,7 +218,7 @@ uint32_t GetBlockDim(uint32_t aivNum)
 {
     // The generated direct-launch wrapper already packs the AIC/AIV mix task.
     // Passing the framework TSCH blockDim (60 on 910B) makes AIV get_block_num()
-    // become 60, while the kernel's logical AIV tiling expects 20 * 2 = 40.
+    // become 60, while the kernel's logical AIV tiling expects 24 * 2 = 48.
     return aivNum;
 }
 } // namespace

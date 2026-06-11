@@ -17,6 +17,7 @@ WARMUP_ITERS=${DISPATCH_FFN_COMBINE_V2_WARMUP_ITERS:-3}
 MEASURE_ITERS=${DISPATCH_FFN_COMBINE_V2_MEASURE_ITERS:-5}
 SKIP_GOLDEN=${DISPATCH_FFN_COMBINE_V2_SKIP_GOLDEN:-0}
 STAGE_PROFILE=${DISPATCH_FFN_COMBINE_V2_STAGE_PROFILE:-0}
+SKIP_BUILD=${DISPATCH_FFN_COMBINE_V2_SKIP_BUILD:-0}
 
 if [[ -z "${ASCEND_HOME_PATH:-}" ]]; then
   if [[ -d /usr/local/Ascend/cann-8.5.0 ]]; then
@@ -61,6 +62,7 @@ while [[ $# -gt 0 ]]; do
     --measure-iters) MEASURE_ITERS="$2"; shift 2 ;;
     --skip-golden) SKIP_GOLDEN=1; shift ;;
     --stage-profile) STAGE_PROFILE=1; shift ;;
+    --skip-build) SKIP_BUILD=1; shift ;;
     *) echo "unknown option: $1"; exit 1 ;;
   esac
 done
@@ -109,12 +111,7 @@ echo "ASCEND_GLOBAL_LOG_LEVEL=${ASCEND_GLOBAL_LOG_LEVEL}"
 echo "ASCEND_SLOG_PRINT_TO_STDOUT=${ASCEND_SLOG_PRINT_TO_STDOUT}"
 echo "HCCL_ENTRY_LOG_ENABLE=${HCCL_ENTRY_LOG_ENABLE}"
 echo "HCCL_BUFFSIZE=${HCCL_BUFFSIZE:-200}"
-
-rm -rf \
-  "${BUILD_DIR}/dispatch_ffn_combine_v2_kernel_host_dir" \
-  "${BUILD_DIR}/dispatch_ffn_combine_v2_kernel_host-prefix" \
-  "${BUILD_DIR}/CMakeFiles/dispatch_ffn_combine_v2_kernel_host_stub_obj.dir" \
-  "${BUILD_DIR}/lib/libdispatch_ffn_combine_v2_kernel.so"
+echo "SKIP_BUILD=${SKIP_BUILD}"
 
 python3 "${SCRIPT_DIR}/scripts/gen_data.py" \
   --output-dir "${OUT_DIR}" \
@@ -128,8 +125,27 @@ python3 "${SCRIPT_DIR}/scripts/gen_data.py" \
   --rtol "${RTOL}" \
   "${GEN_DATA_EXTRA_ARGS[@]}"
 
-cmake -S "${SCRIPT_DIR}" -B "${BUILD_DIR}" -DSOC_VERSION="${SOC}"
-cmake --build "${BUILD_DIR}" --target dispatch_ffn_combine_v2 -j16
+if [[ "${SKIP_BUILD}" == "0" ]]; then
+  rm -rf \
+    "${BUILD_DIR}/dispatch_ffn_combine_v2_kernel_host_dir" \
+    "${BUILD_DIR}/dispatch_ffn_combine_v2_kernel_host-prefix" \
+    "${BUILD_DIR}/CMakeFiles/dispatch_ffn_combine_v2_kernel_host_stub_obj.dir" \
+    "${BUILD_DIR}/lib/libdispatch_ffn_combine_v2_kernel.so"
+
+  cmake -S "${SCRIPT_DIR}" -B "${BUILD_DIR}" -DSOC_VERSION="${SOC}"
+  cmake --build "${BUILD_DIR}" --target dispatch_ffn_combine_v2 -j16
+else
+  if [[ ! -x "${BUILD_DIR}/dispatch_ffn_combine_v2" ]]; then
+    echo "skip-build requested but ${BUILD_DIR}/dispatch_ffn_combine_v2 does not exist or is not executable" >&2
+    echo "run once without --skip-build to build it first" >&2
+    exit 1
+  fi
+  if [[ ! -f "${BUILD_DIR}/lib/libdispatch_ffn_combine_v2_kernel.so" ]]; then
+    echo "skip-build requested but ${BUILD_DIR}/lib/libdispatch_ffn_combine_v2_kernel.so does not exist" >&2
+    echo "run once without --skip-build to build it first" >&2
+    exit 1
+  fi
+fi
 
 export LD_LIBRARY_PATH="${BUILD_DIR}/lib:${LD_LIBRARY_PATH}"
 export DISPATCH_FFN_COMBINE_V2_CASE_DIR="${OUT_DIR}"
