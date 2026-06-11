@@ -102,11 +102,10 @@ public:
 
         FORCE_INLINE_AICORE
         void initHccl(__gm__ DispatchFFNCombineTilingData *tilingData) {
+            (void)tilingData;
             auto contextGM0 = AscendC::GetHcclContext<HCCL_GROUP_ID_0>();
             WinContext_ = (__gm__ HcclOpResParamCustom *)contextGM0;
             A2Context_ = (__gm__ HcclA2CombineOpParam *)contextGM0;
-            hccl_.Init(contextGM0, reinterpret_cast<__gm__ void *>(&tilingData->mc2InitTiling));
-            (void)hccl_.SetCcTiling(reinterpret_cast<__gm__ void *>(&tilingData->mc2CcTiling));
             m_rank = A2Context_->rankId;
             m_rankSize = A2Context_->rankNum;
             m_segmentSize = A2Context_->winSize;
