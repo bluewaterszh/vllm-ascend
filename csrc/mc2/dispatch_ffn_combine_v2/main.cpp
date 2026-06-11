@@ -637,13 +637,14 @@ bool RunOneRank(int rank_id, int world_size, const std::string &case_dir, const 
         args.out = out_dev.ptr;
         args.expert_token_nums = expert_token_nums_dev.ptr;
         args.profile_data = profile_dev.ptr;
-        args.stage_profile = stage_profile ? 1U : 0U;
+        args.stage_profile = 0U;
         TraceLog(rank_id, "launch args ready block_dim=" + std::to_string(args.block_dim) +
                               " func_key=" + std::to_string(args.func_key) +
                               " stream=" + PtrText(runtime.compute_stream));
 
-        auto launch_once = [&]() {
-            TraceLog(rank_id, "kernel launch begin");
+        auto launch_once = [&](uint32_t stage_profile_flag) {
+            args.stage_profile = stage_profile_flag;
+            TraceLog(rank_id, "kernel launch begin stage_profile=" + std::to_string(stage_profile_flag));
             const uint32_t launch_ret = launchDispatchFFNCombine(args, runtime.compute_stream);
             if (launch_ret != 0) {
                 throw std::runtime_error("kernel launch failed, ret=" + std::to_string(launch_ret));
@@ -668,7 +669,7 @@ bool RunOneRank(int rank_id, int world_size, const std::string &case_dir, const 
             TraceLog(rank_id, "warmup iter=" + std::to_string(iter) + " pre-launch barrier begin");
             CommMpiBarrier();
             TraceLog(rank_id, "warmup iter=" + std::to_string(iter) + " pre-launch barrier done");
-            launch_once();
+            launch_once(0U);
             TraceLog(rank_id, "warmup iter=" + std::to_string(iter) + " post-launch barrier begin");
             CommMpiBarrier();
             TraceLog(rank_id, "warmup iter=" + std::to_string(iter) + " done");
@@ -681,27 +682,31 @@ bool RunOneRank(int rank_id, int world_size, const std::string &case_dir, const 
             CommMpiBarrier();
             TraceLog(rank_id, "measure iter=" + std::to_string(iter) + " pre-launch barrier done");
             const auto host_start = std::chrono::high_resolution_clock::now();
-            TraceLog(rank_id, "measure iter=" + std::to_string(iter) + " kernel launch begin");
-            const uint32_t launch_ret = launchDispatchFFNCombine(args, runtime.compute_stream);
-            if (launch_ret != 0) {
-                throw std::runtime_error("kernel launch failed, ret=" + std::to_string(launch_ret));
-            }
-            TraceLog(rank_id, "measure iter=" + std::to_string(iter) + " kernel launch returned, sync begin");
-            SynchronizeStream(runtime.compute_stream);
+            launch_once(0U);
             TraceLog(rank_id, "measure iter=" + std::to_string(iter) + " sync done, post barrier begin");
             CommMpiBarrier();
             const auto host_end = std::chrono::high_resolution_clock::now();
             TraceLog(rank_id, "measure iter=" + std::to_string(iter) + " post barrier done");
 
-            std::vector<uint8_t> profile_host;
             TraceLog(rank_id, "measure iter=" + std::to_string(iter) + " read profile begin");
-            kernel_times_us.push_back(ReadKernelProfileUs(profile_dev, build.block_dim,
-                                                          stage_profile ? &profile_host : nullptr));
-            if (stage_profile) {
-                last_profile_host = std::move(profile_host);
-            }
+            kernel_times_us.push_back(ReadKernelProfileUs(profile_dev, build.block_dim));
             e2e_times_us.push_back(std::chrono::duration<double, std::micro>(host_end - host_start).count());
             TraceLog(rank_id, "measure iter=" + std::to_string(iter) + " done");
+        }
+
+        if (stage_profile) {
+            TraceLog(rank_id, "stage-profile iter prepare begin");
+            PrepareIterationState(runtime, out_dev, expert_token_nums_dev, workspace_dev, profile_dev);
+            TraceLog(rank_id, "stage-profile iter pre-launch barrier begin");
+            CommMpiBarrier();
+            TraceLog(rank_id, "stage-profile iter pre-launch barrier done");
+            launch_once(1U);
+            TraceLog(rank_id, "stage-profile iter post-launch barrier begin");
+            CommMpiBarrier();
+            TraceLog(rank_id, "stage-profile iter post-launch barrier done");
+            TraceLog(rank_id, "stage-profile iter read profile begin");
+            ReadKernelProfileUs(profile_dev, build.block_dim, &last_profile_host);
+            TraceLog(rank_id, "stage-profile iter done");
         }
 
         TraceLog(rank_id, "gather perf samples begin");
@@ -712,12 +717,12 @@ bool RunOneRank(int rank_id, int world_size, const std::string &case_dir, const 
             PrintPerfSummary(warmup_iters, measure_iters, kernel_max_samples, e2e_max_samples);
         }
         if (stage_profile) {
-            if (measure_iters > 0) {
+            if (!last_profile_host.empty()) {
                 PrintOrderedByRank(rank_id, world_size,
                                    BuildStageProfileReportText(rank_id, last_profile_host, build.block_dim));
             } else {
                 PrintOrderedByRank(rank_id, world_size,
-                                   "rank=" + std::to_string(rank_id) + " stageProfile EMPTY measure_iters=0");
+                                   "rank=" + std::to_string(rank_id) + " stageProfile EMPTY profile_iter=0");
             }
         }
 
@@ -726,7 +731,7 @@ bool RunOneRank(int rank_id, int world_size, const std::string &case_dir, const 
         TraceLog(rank_id, "final accuracy launch barrier begin");
         CommMpiBarrier();
         TraceLog(rank_id, "final accuracy launch barrier done");
-        launch_once();
+        launch_once(0U);
         TraceLog(rank_id, "final accuracy post barrier begin");
         CommMpiBarrier();
         TraceLog(rank_id, "final accuracy post barrier done");
