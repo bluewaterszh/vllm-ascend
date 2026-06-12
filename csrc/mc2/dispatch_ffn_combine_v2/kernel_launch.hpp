@@ -52,6 +52,7 @@ struct DispatchFFNCombineLaunchArgs {
     void *profile_data = nullptr;
     uint32_t block_dim = 1;
     uint32_t stage_profile = 0;
+    uint32_t start_sync_debug = 0;
     uint64_t func_key = DISPATCH_FFN_COMBINE_STANDALONE_FUNC_KEY;
 };
 

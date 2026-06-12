@@ -553,13 +553,15 @@ bool RunOneRank(int rank_id, int world_size, const std::string &case_dir, const 
         const int measure_iters = ParseEnvInt("DISPATCH_FFN_COMBINE_V2_MEASURE_ITERS", kDefaultMeasureIters);
         const bool skip_accuracy = ParseEnvInt("DISPATCH_FFN_COMBINE_V2_SKIP_ACCURACY", 0) != 0;
         const bool stage_profile = ParseEnvInt("DISPATCH_FFN_COMBINE_V2_STAGE_PROFILE", 0) != 0;
+        const bool start_sync_debug = ParseEnvInt("DISPATCH_FFN_COMBINE_V2_START_SYNC_DEBUG", 0) != 0;
         if (warmup_iters < 0 || measure_iters < 0) {
             throw std::runtime_error("warmup/measure iters must be non-negative");
         }
         TraceLog(rank_id, "env parsed warmup=" + std::to_string(warmup_iters) +
                               " measure=" + std::to_string(measure_iters) +
                               " skip_accuracy=" + std::to_string(skip_accuracy ? 1 : 0) +
-                              " stage_profile=" + std::to_string(stage_profile ? 1 : 0));
+                              " stage_profile=" + std::to_string(stage_profile ? 1 : 0) +
+                              " start_sync_debug=" + std::to_string(start_sync_debug ? 1 : 0));
 
         TraceLog(rank_id, "load case config begin");
         const CaseConfig cfg = LoadCaseConfig(case_dir + "/case.json");
@@ -638,13 +640,16 @@ bool RunOneRank(int rank_id, int world_size, const std::string &case_dir, const 
         args.expert_token_nums = expert_token_nums_dev.ptr;
         args.profile_data = profile_dev.ptr;
         args.stage_profile = 0U;
+        args.start_sync_debug = start_sync_debug ? 1U : 0U;
         TraceLog(rank_id, "launch args ready block_dim=" + std::to_string(args.block_dim) +
                               " func_key=" + std::to_string(args.func_key) +
+                              " start_sync_debug=" + std::to_string(args.start_sync_debug) +
                               " stream=" + PtrText(runtime.compute_stream));
 
         auto launch_once = [&](uint32_t stage_profile_flag) {
             args.stage_profile = stage_profile_flag;
-            TraceLog(rank_id, "kernel launch begin stage_profile=" + std::to_string(stage_profile_flag));
+            TraceLog(rank_id, "kernel launch begin stage_profile=" + std::to_string(stage_profile_flag) +
+                                  " start_sync_debug=" + std::to_string(args.start_sync_debug));
             const uint32_t launch_ret = launchDispatchFFNCombine(args, runtime.compute_stream);
             if (launch_ret != 0) {
                 throw std::runtime_error("kernel launch failed, ret=" + std::to_string(launch_ret));

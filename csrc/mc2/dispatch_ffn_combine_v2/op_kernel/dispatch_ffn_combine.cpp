@@ -25,7 +25,7 @@ using namespace AscendC;
 using namespace DispatchFFNCombineImpl;
 extern "C" __global__ __aicore__ void dispatch_ffn_combine(GM_ADDR x, GM_ADDR w1, GM_ADDR w2,  GM_ADDR expertId, GM_ADDR scale1, GM_ADDR scale2, GM_ADDR probs,
     GM_ADDR xActiveMask, GM_ADDR c, GM_ADDR expertTokenNums, GM_ADDR workspaceGM,  GM_ADDR tilingGM, GM_ADDR profileGM,
-    uint32_t stageProfile)
+    uint32_t stageProfile, uint32_t startSyncDebug)
 {
     __gm__ uint64_t *profileEntry = nullptr;
     if (profileGM != nullptr) {
@@ -40,6 +40,26 @@ extern "C" __global__ __aicore__ void dispatch_ffn_combine(GM_ADDR x, GM_ADDR w1
     }
 
     REGISTER_TILING_DEFAULT(DispatchFFNCombineTilingData);
+    __gm__ DispatchFFNCombineTilingData *tilingData =
+        reinterpret_cast<__gm__ DispatchFFNCombineTilingData *>(tilingGM);
+    if (startSyncDebug != 0U) {
+#ifdef HCCL_COMM
+        if (tilingData->runtimeInfo.symmetricPtr != 0) {
+            AscendC::SetHcclContext<HCCL_GROUP_ID_0>(
+                reinterpret_cast<__gm__ uint8_t *>(tilingData->runtimeInfo.symmetricPtr));
+        }
+        HcclShmem startSyncShmem;
+        startSyncShmem.initHccl(tilingData);
+#else
+        HcclShmem startSyncShmem;
+        startSyncShmem.initShmem(static_cast<GM_ADDR>(tilingData->runtimeInfo.symmetricPtr),
+                                 tilingData->runtimeInfo.rank, tilingData->runtimeInfo.rankSize);
+#endif
+        startSyncShmem.CrossRankStartSyncAiv();
+        startSyncShmem.CrossRankStartSyncAic();
+        AscendC::SyncAll<false>();
+        pipe_barrier(PIPE_ALL);
+    }
     uint64_t tStart = get_sys_cnt();
     if (profileEntry != nullptr) {
         profileEntry[DISPATCH_FFN_COMBINE_PROFILE_KERNEL_START] = tStart;
@@ -87,6 +107,7 @@ uint32_t launchDispatchFFNCombine(const DispatchFFNCombineLaunchArgs &args, void
         alignas(((alignof(void*) + 3) >> 2) << 2) void *tilingGM;
         alignas(((alignof(void*) + 3) >> 2) << 2) void *profileGM;
         alignas(((alignof(uint32_t) + 3) >> 2) << 2) uint32_t stageProfile;
+        alignas(((alignof(uint32_t) + 3) >> 2) << 2) uint32_t startSyncDebug;
         alignas(((alignof(void*) + 3) >> 2) << 2) void *__ascendc_overflow;
     } kernel_args{};
 
@@ -116,6 +137,7 @@ uint32_t launchDispatchFFNCombine(const DispatchFFNCombineLaunchArgs &args, void
     kernel_args.tilingGM = args.tiling;
     kernel_args.profileGM = args.profile_data;
     kernel_args.stageProfile = args.stage_profile;
+    kernel_args.startSyncDebug = args.start_sync_debug;
 
     ret = launch_and_profiling_dispatch_ffn_combine(args.func_key, args.block_dim, stream,
                                                     reinterpret_cast<void **>(&kernel_args), sizeof(kernel_args));
@@ -136,7 +158,8 @@ uint32_t launchDispatchFFNCombine(const DispatchFFNCombineLaunchArgs &args, void
         reinterpret_cast<GM_ADDR>(args.workspace),
         reinterpret_cast<GM_ADDR>(args.tiling),
         reinterpret_cast<GM_ADDR>(args.profile_data),
-        args.stage_profile);
+        args.stage_profile,
+        args.start_sync_debug);
     return 0;
 #endif
 }

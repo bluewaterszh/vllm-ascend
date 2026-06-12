@@ -23,6 +23,13 @@ constexpr uint16_t RECV_SYNC_EVENT_ID = 10;
 
 constexpr uint32_t SELF_STATE_OFFSET = 256 * 1024;
 constexpr uint32_t STATE_OFFSET = 512;
+constexpr uint32_t CROSS_RANK_SYNC_COUNTER_STRIDE = 16;
+constexpr uint32_t COMBINE_BARRIER_COUNTER_BASE_INDEX = 0;
+constexpr uint32_t COMBINE_BARRIER_EPOCH_INDEX = 2048;
+constexpr uint32_t START_AIV_BARRIER_COUNTER_BASE_INDEX = 4096;
+constexpr uint32_t START_AIV_BARRIER_EPOCH_INDEX = 6144;
+constexpr uint32_t START_AIC_BARRIER_COUNTER_BASE_INDEX = 8192;
+constexpr uint32_t START_AIC_BARRIER_EPOCH_INDEX = 10240;
 
 FORCE_INLINE_AICORE void AicSyncAll() {
     AscendC::CrossCoreSetFlag<0x0, PIPE_FIX>(8);
@@ -177,21 +184,51 @@ public:
     FORCE_INLINE_AICORE
     void CrossRankSync() {
         uint64_t flag_offset = (m_segmentSize - MB_SIZE) / sizeof(int32_t);
-        __gm__ int32_t* sync_counter = (__gm__ int32_t*)(*this)() + flag_offset;
-        __gm__ int32_t* sync_base = (__gm__ int32_t*)(*this)() + flag_offset + 2048;
+        __gm__ int32_t* sync_counter =
+            (__gm__ int32_t*)(*this)() + flag_offset + COMBINE_BARRIER_COUNTER_BASE_INDEX;
+        __gm__ int32_t* sync_base = (__gm__ int32_t*)(*this)() + flag_offset + COMBINE_BARRIER_EPOCH_INDEX;
         int count = gm_load(sync_base) + 1;
         int vec_id = AscendC::GetBlockIdx();
         int vec_size = AscendC::GetBlockNum() * AscendC::GetTaskRation();
         for(int i = vec_id; i < m_rankSize; i += vec_size) {
-            __gm__ int32_t* sync_remote = (__gm__ int32_t*)((*this)(i)) + flag_offset + m_rank * 16;
+            __gm__ int32_t* sync_remote = (__gm__ int32_t*)((*this)(i)) + flag_offset +
+                                          COMBINE_BARRIER_COUNTER_BASE_INDEX +
+                                          m_rank * CROSS_RANK_SYNC_COUNTER_STRIDE;
             gm_store(sync_remote, count);
             gm_dcci((__gm__ uint8_t*)sync_remote);
-            auto sync_check = sync_counter + i * 16;
+            auto sync_check = sync_counter + i * CROSS_RANK_SYNC_COUNTER_STRIDE;
             gm_signal_wait_until_eq_for_barrier(sync_check, count);
         }
 
         AscendC::SyncAll<true>();
         gm_store(sync_base, count);
+    }
+
+    FORCE_INLINE_AICORE
+    void CrossRankStartSyncAiv() {
+        if ASCEND_IS_AIV {
+            int32_t coreId = static_cast<int32_t>(get_block_idx()) +
+                             static_cast<int32_t>(get_subblockid()) * static_cast<int32_t>(get_block_num());
+            int32_t coreNum = static_cast<int32_t>(get_block_num()) * static_cast<int32_t>(get_subblockdim());
+            int32_t count =
+                CrossRankSyncSignals(START_AIV_BARRIER_COUNTER_BASE_INDEX, START_AIV_BARRIER_EPOCH_INDEX,
+                                     coreId, coreNum);
+            AscendC::SyncAll<true>();
+            PublishCrossRankSyncEpoch(START_AIV_BARRIER_EPOCH_INDEX, count);
+        }
+    }
+
+    FORCE_INLINE_AICORE
+    void CrossRankStartSyncAic() {
+        if ASCEND_IS_AIC {
+            int32_t coreId = static_cast<int32_t>(get_block_idx());
+            int32_t coreNum = static_cast<int32_t>(get_block_num());
+            int32_t count =
+                CrossRankSyncSignals(START_AIC_BARRIER_COUNTER_BASE_INDEX, START_AIC_BARRIER_EPOCH_INDEX,
+                                     coreId, coreNum);
+            AicSyncAll();
+            PublishCrossRankSyncEpoch(START_AIC_BARRIER_EPOCH_INDEX, count);
+        }
     }
 
 
@@ -321,7 +358,7 @@ public:
     FORCE_INLINE_AICORE
     __gm__ int32_t* SyncBaseAddr() {
         uint64_t flag_offset = (m_segmentSize - MB_SIZE) / sizeof(int32_t);
-        return (__gm__ int32_t*)(*this)() + flag_offset + 2048;
+        return (__gm__ int32_t*)(*this)() + flag_offset + COMBINE_BARRIER_EPOCH_INDEX;
     }
 
 private:
@@ -331,6 +368,42 @@ private:
     size_t m_segmentSize;
     float sumTarget_{0.0};
     int32_t epStateValue_;
+
+    FORCE_INLINE_AICORE
+    __gm__ int32_t *LocalSignalBase() {
+        uint64_t flag_offset = (m_segmentSize - MB_SIZE) / sizeof(int32_t);
+        return (__gm__ int32_t *)(*this)() + flag_offset;
+    }
+
+    FORCE_INLINE_AICORE
+    __gm__ int32_t *RemoteSignalBase(int32_t rankId) {
+        uint64_t flag_offset = (m_segmentSize - MB_SIZE) / sizeof(int32_t);
+        return (__gm__ int32_t *)((*this)(rankId)) + flag_offset;
+    }
+
+    FORCE_INLINE_AICORE
+    int32_t CrossRankSyncSignals(uint32_t counterBaseIndex, uint32_t epochIndex, int32_t coreId, int32_t coreNum) {
+        __gm__ int32_t *localSignalBase = LocalSignalBase();
+        __gm__ int32_t *syncBase = localSignalBase + epochIndex;
+        int32_t count = gm_load(syncBase) + 1;
+        pipe_barrier(PIPE_ALL);
+        for (int32_t i = coreId; i < m_rankSize; i += coreNum) {
+            __gm__ int32_t *remoteSignalBase = RemoteSignalBase(i);
+            __gm__ int32_t *remoteBarrier =
+                remoteSignalBase + counterBaseIndex + m_rank * CROSS_RANK_SYNC_COUNTER_STRIDE;
+            __gm__ int32_t *localBarrier =
+                localSignalBase + counterBaseIndex + i * CROSS_RANK_SYNC_COUNTER_STRIDE;
+            gm_store(remoteBarrier, count);
+            gm_dcci((__gm__ uint8_t *)remoteBarrier);
+            gm_signal_wait_until_eq_for_barrier(localBarrier, count);
+        }
+        return count;
+    }
+
+    FORCE_INLINE_AICORE
+    void PublishCrossRankSyncEpoch(uint32_t epochIndex, int32_t count) {
+        gm_store(LocalSignalBase() + epochIndex, count);
+    }
 };
 
 
