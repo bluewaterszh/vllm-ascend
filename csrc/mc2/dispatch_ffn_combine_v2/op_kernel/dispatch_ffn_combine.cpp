@@ -27,7 +27,6 @@ extern "C" __global__ __aicore__ void dispatch_ffn_combine(GM_ADDR x, GM_ADDR w1
     GM_ADDR xActiveMask, GM_ADDR c, GM_ADDR expertTokenNums, GM_ADDR workspaceGM,  GM_ADDR tilingGM, GM_ADDR profileGM,
     uint32_t stageProfile)
 {
-    uint64_t tStart = get_sys_cnt();
     __gm__ uint64_t *profileEntry = nullptr;
     if (profileGM != nullptr) {
         uint64_t profileOffset =
@@ -38,10 +37,13 @@ extern "C" __global__ __aicore__ void dispatch_ffn_combine(GM_ADDR x, GM_ADDR w1
 #endif
         profileEntry =
             reinterpret_cast<__gm__ uint64_t *>(reinterpret_cast<__gm__ uint8_t *>(profileGM) + profileOffset);
-        profileEntry[DISPATCH_FFN_COMBINE_PROFILE_KERNEL_START] = tStart;
     }
 
     REGISTER_TILING_DEFAULT(DispatchFFNCombineTilingData);
+    uint64_t tStart = get_sys_cnt();
+    if (profileEntry != nullptr) {
+        profileEntry[DISPATCH_FFN_COMBINE_PROFILE_KERNEL_START] = tStart;
+    }
     if (TILING_KEY_IS(DISPATCH_FFN_COMBINE_DEVICE_TILING_KEY)) {
         KERNEL_TASK_TYPE(DISPATCH_FFN_COMBINE_DEVICE_TILING_KEY, KERNEL_TYPE_MIX_AIC_1_2);
         DispatchFFNCombine<int8_t, DTYPE_W1, DTYPE_OUT, false, true> op;

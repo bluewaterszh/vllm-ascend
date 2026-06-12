@@ -996,16 +996,13 @@ private:
             blockEpilogue3.SetFlag();
             CombineV2(params, blockEpilogue3);
         }
-        RecordStageEnd(params, DISPATCH_FFN_COMBINE_PROFILE_STAGE_COMBINE);
-
-        
-        
-        RecordStageStart(params, DISPATCH_FFN_COMBINE_PROFILE_STAGE_UNPERMUTE);
         AscendC::SyncAll<true>();
         ResetTokenPerExpert(params.EP * paddedExpertNumAligned);
 
         shmem.CrossRankSync();
+        RecordStageEnd(params, DISPATCH_FFN_COMBINE_PROFILE_STAGE_COMBINE);
 
+        RecordStageStart(params, DISPATCH_FFN_COMBINE_PROFILE_STAGE_UNPERMUTE);
         MoeTokenUnpermuteTilingData tilingData;
         MoeTokenUnpermuteTiling(params.problemShape.m() * params.topK, n2, params.topK, tilingData, coreNum);
         KernelMoeTokenUnpermute<ElementD2, int32_t, float, true> kernelMoeTokenUnpermuteOp;
