@@ -63,7 +63,7 @@ while [[ $# -gt 0 ]]; do
     --warmup-iters) WARMUP_ITERS="$2"; shift 2 ;;
     --measure-iters) MEASURE_ITERS="$2"; shift 2 ;;
     --skip-golden) SKIP_GOLDEN=1; shift ;;
-    --stage-profile) STAGE_PROFILE=1; shift ;;
+    --stage-profile|-stage-profile) STAGE_PROFILE=1; shift ;;
     --start-sync-debug) START_SYNC_DEBUG=1; shift ;;
     --skip-build) SKIP_BUILD=1; shift ;;
     --trace) TRACE=1; shift ;;
