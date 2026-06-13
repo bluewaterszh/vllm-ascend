@@ -258,6 +258,37 @@ private:
         RecordProfile(params, DISPATCH_FFN_COMBINE_PROFILE_STAGE_BASE + stage * 2U + 1U);
     }
 
+    CATLASS_DEVICE uint64_t ProfileNow(Params const &params) const
+    {
+        return params.profileEntryGM == nullptr ? 0U : get_sys_cnt();
+    }
+
+    CATLASS_DEVICE void RecordGmm1L1TileProfile(Params const &params, uint32_t groupIdx, uint64_t start,
+                                                uint64_t end, uint64_t l1TileCount) const
+    {
+        if (params.profileEntryGM == nullptr || start == 0U || end < start ||
+            groupIdx >= DISPATCH_FFN_COMBINE_PROFILE_GMM1_DETAIL_MAX_EXPERTS) {
+            return;
+        }
+        const uint32_t base = DISPATCH_FFN_COMBINE_PROFILE_GMM1_DETAIL_BASE +
+                              groupIdx * DISPATCH_FFN_COMBINE_PROFILE_GMM1_DETAIL_FIELD_COUNT;
+        if (base + DISPATCH_FFN_COMBINE_PROFILE_GMM1_DETAIL_FIELD_COUNT >
+            DISPATCH_FFN_COMBINE_PROFILE_ENTRY_U64_COUNT) {
+            return;
+        }
+        volatile __gm__ uint64_t *profileEntry =
+            reinterpret_cast<volatile __gm__ uint64_t *>(params.profileEntryGM);
+        if (profileEntry[base + 3U] == 0U) {
+            if (l1TileCount == 0U) {
+                return;
+            }
+            profileEntry[base] = start;
+        }
+        profileEntry[base + 1U] = end;
+        profileEntry[base + 2U] += end - start;
+        profileEntry[base + 3U] += l1TileCount;
+    }
+
     CATLASS_DEVICE void initBuffer(Params const &params) {
         #ifndef HCCL_COMM
             shmem.initShmem(params.symmetricPtr, params.rank, params.rankSize);
@@ -473,6 +504,7 @@ private:
         int64_t gmGroupOffsetC = 0;
         uint32_t startCoreIdx = 0;
         uint32_t syncGroupIdx = 0;
+        uint32_t lastProfileGroupWithTile = params.expertPerRank;
         int64_t preCurrentmSum = 0;
         int32_t syncLoopIdx = -1;
 
@@ -505,6 +537,11 @@ private:
             // Determine the starting loopIdx of the current core under the current groupIdx
             uint32_t startLoopIdx = ((coreIdx < startCoreIdx) ? (coreIdx + coreNum) : coreIdx) - startCoreIdx;
             // Loop through the matmul of each groupIdx
+            uint32_t assignedTileCount = 0;
+            if (params.profileEntryGM != nullptr && currentM > 0 && startLoopIdx < coreLoops) {
+                assignedTileCount = (coreLoops - 1U - startLoopIdx) / coreNum + 1U;
+            }
+            uint64_t l1TileProfileStart = 0U;
 
             for (uint32_t loopIdx = startLoopIdx; loopIdx < coreLoops; loopIdx += coreNum) {
                 for(;syncGroupIdx <= groupIdx; syncGroupIdx++) {
@@ -524,6 +561,9 @@ private:
                 int64_t gmOffsetC = layoutC.GetOffset(offsetC);
                 int64_t gmOffsetS = blockCoord.n() * L1TileShape::N + (params.listLen == 1 ? groupIdx * params.problemShape.n() : 0);
                 if (currentM > 0) {
+                    if (params.profileEntryGM != nullptr && l1TileProfileStart == 0U) {
+                        l1TileProfileStart = ProfileNow(params);
+                    }
                     blockMmad(
                         gmA[gmGroupOffsetA + gmOffsetA], layoutA,
                         gmB1[gmGroupOffsetB + gmOffsetB], layoutB1,
@@ -533,11 +573,24 @@ private:
                     );
                 }
             }
+            if (params.profileEntryGM != nullptr && assignedTileCount != 0U && l1TileProfileStart != 0U) {
+                RecordGmm1L1TileProfile(params, groupIdx, l1TileProfileStart, ProfileNow(params), assignedTileCount);
+                lastProfileGroupWithTile = groupIdx;
+            }
  
             if ((groupIdx + 1) == params.epilogueGranularity  && (groupIdx < params.expertPerRank - 1)) {
                 syncLoopIdx ++;
                 if constexpr (BlockMmad::DispatchPolicy::ASYNC) {
+                    uint64_t drainProfileStart =
+                        (params.profileEntryGM == nullptr || lastProfileGroupWithTile == params.expertPerRank) ?
+                            0U :
+                            ProfileNow(params);
                     blockMmad.SynchronizeBlock();
+                    if (params.profileEntryGM != nullptr && lastProfileGroupWithTile != params.expertPerRank) {
+                        RecordGmm1L1TileProfile(params, lastProfileGroupWithTile, drainProfileStart,
+                                                ProfileNow(params), 0U);
+                        lastProfileGroupWithTile = params.expertPerRank;
+                    }
                 }
                 // Synchronization signal: GMM1 notifies SwiGLU [1]
                 blockMmad.Finalize(syncLoopIdx, SYNCFLAGC2V);
@@ -558,7 +611,15 @@ private:
         }
 
         if constexpr (BlockMmad::DispatchPolicy::ASYNC) {
+            uint64_t drainProfileStart =
+                (params.profileEntryGM == nullptr || lastProfileGroupWithTile == params.expertPerRank) ?
+                    0U :
+                    ProfileNow(params);
             blockMmad.SynchronizeBlock();
+            if (params.profileEntryGM != nullptr && lastProfileGroupWithTile != params.expertPerRank) {
+                RecordGmm1L1TileProfile(params, lastProfileGroupWithTile, drainProfileStart, ProfileNow(params), 0U);
+                lastProfileGroupWithTile = params.expertPerRank;
+            }
         }
         // Synchronization signal: GMM1 notifies SwiGLU [2]
         blockMmad.Finalize(syncLoopIdx + 1, SYNCFLAGC2V);

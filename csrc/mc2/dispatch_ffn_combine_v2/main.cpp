@@ -319,11 +319,72 @@ struct StageProfileEnvelope {
     uint64_t max_core_ticks = 0;
 };
 
+struct Gmm1DetailProfileEnvelope {
+    bool valid = false;
+    uint32_t active_entries = 0;
+    uint64_t start_min = 0;
+    uint64_t end_max = 0;
+    uint64_t max_core_ticks = 0;
+    uint64_t sum_core_ticks = 0;
+    uint64_t l1_tile_count = 0;
+    uint64_t max_l1_tile_count = 0;
+};
+
+uint32_t CeilDivU32(uint32_t value, uint32_t divisor)
+{
+    return divisor == 0U ? 0U : (value + divisor - 1U) / divisor;
+}
+
+uint32_t AlignUpU32(uint32_t value, uint32_t align)
+{
+    return align == 0U ? value : CeilDivU32(value, align) * align;
+}
+
+void UpdateStageProfileEnvelope(StageProfileEnvelope &env, uint64_t start, uint64_t end)
+{
+    if (!env.valid) {
+        env.valid = true;
+        env.start_min = start;
+        env.end_max = end;
+    } else {
+        env.start_min = std::min(env.start_min, start);
+        env.end_max = std::max(env.end_max, end);
+    }
+    env.active_entries += 1U;
+    env.max_core_ticks = std::max(env.max_core_ticks, end - start);
+}
+
+void UpdateGmm1DetailEnvelope(Gmm1DetailProfileEnvelope &env, uint64_t start, uint64_t end, uint64_t total,
+                              uint64_t l1_tile_count)
+{
+    if (!env.valid) {
+        env.valid = true;
+        env.start_min = start;
+        env.end_max = end;
+    } else {
+        env.start_min = std::min(env.start_min, start);
+        env.end_max = std::max(env.end_max, end);
+    }
+    env.active_entries += 1U;
+    env.max_core_ticks = std::max(env.max_core_ticks, total);
+    env.sum_core_ticks += total;
+    env.l1_tile_count += l1_tile_count;
+    env.max_l1_tile_count = std::max(env.max_l1_tile_count, l1_tile_count);
+}
+
 bool ProfileIntervalValid(const uint64_t *entry, uint32_t stage)
 {
     const uint64_t start = entry[DispatchFFNCombineProfileStageStartIndex(stage)];
     const uint64_t end = entry[DispatchFFNCombineProfileStageEndIndex(stage)];
     return start != 0U && end != 0U && end >= start;
+}
+
+bool Gmm1DetailProfileValid(const uint64_t *entry, uint32_t expert)
+{
+    const uint64_t start = entry[DispatchFFNCombineProfileGmm1DetailStartIndex(expert)];
+    const uint64_t end = entry[DispatchFFNCombineProfileGmm1DetailEndIndex(expert)];
+    const uint64_t count = entry[DispatchFFNCombineProfileGmm1DetailCountIndex(expert)];
+    return count != 0U && start != 0U && end != 0U && end >= start;
 }
 
 double ReadKernelProfileUs(const DeviceBuffer &profile_dev, uint32_t block_dim, std::vector<uint8_t> *profile_host = nullptr)
@@ -364,7 +425,9 @@ double ReadKernelProfileUs(const DeviceBuffer &profile_dev, uint32_t block_dim, 
     return SysCntTicksToUs(end_max - start_min);
 }
 
-std::string BuildStageProfileReportText(int rank_id, const std::vector<uint8_t> &profile, uint32_t block_dim)
+std::string BuildStageProfileReportText(int rank_id, const std::vector<uint8_t> &profile, uint32_t block_dim,
+                                        const CaseConfig *cfg = nullptr,
+                                        const std::vector<int32_t> *expert_token_nums = nullptr)
 {
     std::ostringstream os;
     os << std::fixed << std::setprecision(2);
@@ -376,6 +439,13 @@ std::string BuildStageProfileReportText(int rank_id, const std::vector<uint8_t> 
     uint64_t kernel_start_min = std::numeric_limits<uint64_t>::max();
     uint64_t kernel_end_max = 0;
     std::array<StageProfileEnvelope, DISPATCH_FFN_COMBINE_PROFILE_STAGE_COUNT> envelopes{};
+    std::array<Gmm1DetailProfileEnvelope, DISPATCH_FFN_COMBINE_PROFILE_GMM1_DETAIL_MAX_EXPERTS>
+        gmm1_detail_envelopes{};
+    bool gmm1_detail_valid = false;
+    const uint32_t gmm1_profile_experts =
+        cfg == nullptr ?
+            DISPATCH_FFN_COMBINE_PROFILE_GMM1_DETAIL_MAX_EXPERTS :
+            std::min<uint32_t>(cfg->expert_per_rank, DISPATCH_FFN_COMBINE_PROFILE_GMM1_DETAIL_MAX_EXPERTS);
 
     for (uint32_t block = 0; block < block_dim; ++block) {
         for (uint32_t profile_idx = 0; profile_idx < DISPATCH_FFN_COMBINE_PROFILE_ENTRIES_PER_BLOCK; ++profile_idx) {
@@ -397,17 +467,21 @@ std::string BuildStageProfileReportText(int rank_id, const std::vector<uint8_t> 
                 }
                 const uint64_t start = entry[DispatchFFNCombineProfileStageStartIndex(stage)];
                 const uint64_t end = entry[DispatchFFNCombineProfileStageEndIndex(stage)];
-                StageProfileEnvelope &env = envelopes[stage];
-                if (!env.valid) {
-                    env.valid = true;
-                    env.start_min = start;
-                    env.end_max = end;
-                } else {
-                    env.start_min = std::min(env.start_min, start);
-                    env.end_max = std::max(env.end_max, end);
+                UpdateStageProfileEnvelope(envelopes[stage], start, end);
+            }
+
+            if (profile_idx == 0U) {
+                for (uint32_t expert = 0; expert < gmm1_profile_experts; ++expert) {
+                    if (!Gmm1DetailProfileValid(entry, expert)) {
+                        continue;
+                    }
+                    const uint64_t start = entry[DispatchFFNCombineProfileGmm1DetailStartIndex(expert)];
+                    const uint64_t end = entry[DispatchFFNCombineProfileGmm1DetailEndIndex(expert)];
+                    const uint64_t total = entry[DispatchFFNCombineProfileGmm1DetailTotalIndex(expert)];
+                    const uint64_t count = entry[DispatchFFNCombineProfileGmm1DetailCountIndex(expert)];
+                    UpdateGmm1DetailEnvelope(gmm1_detail_envelopes[expert], start, end, total, count);
+                    gmm1_detail_valid = true;
                 }
-                env.active_entries += 1U;
-                env.max_core_ticks = std::max(env.max_core_ticks, end - start);
             }
         }
     }
@@ -431,6 +505,82 @@ std::string BuildStageProfileReportText(int rank_id, const std::vector<uint8_t> 
            << " end_us=" << SysCntTicksToUs(env.end_max - kernel_start_min)
            << " envelope_us=" << SysCntTicksToUs(env.end_max - env.start_min)
            << " max_core_us=" << SysCntTicksToUs(env.max_core_ticks) << '\n';
+    }
+
+    if (gmm1_detail_valid) {
+        constexpr uint32_t kL1TileM = 128U;
+        constexpr uint32_t kL1TileN = 256U;
+        constexpr uint32_t kL1TileK = 512U;
+        constexpr uint32_t kL0TileM = 128U;
+        constexpr uint32_t kL0TileN = 256U;
+        constexpr uint32_t kL0TileK = 128U;
+        os << "rank=" << rank_id << " gmm1DetailEnvelope base=syscnt_min_kernel_start active_aic_only=1"
+           << " fields=firstLastTotalL1TileCount"
+           << " timing=async_l1_mn_tile_issue_plus_segment_drain"
+           << " v2_compare_boundary=blockMmad\n";
+        uint32_t group_base = 0;
+        for (uint32_t expert = 0; expert < gmm1_profile_experts; ++expert) {
+            const uint32_t current_m_raw =
+                expert_token_nums != nullptr && expert < expert_token_nums->size() ?
+                    static_cast<uint32_t>((*expert_token_nums)[expert]) :
+                    0U;
+            const uint32_t remaining =
+                cfg == nullptr || group_base >= cfg->max_output_size ? 0U : cfg->max_output_size - group_base;
+            const uint32_t current_m =
+                cfg == nullptr ? current_m_raw : std::min<uint32_t>(current_m_raw, remaining);
+            const uint32_t problem_k = cfg == nullptr ? 0U : cfg->k;
+            const uint32_t problem_n = cfg == nullptr ? 0U : cfg->n;
+            const uint32_t tile_m = CeilDivU32(current_m, kL1TileM);
+            const uint32_t tile_n = CeilDivU32(problem_n, kL1TileN);
+            const uint32_t mn_tiles = tile_m * tile_n;
+            const uint32_t l1_k_blocks = CeilDivU32(problem_k, kL1TileK);
+            const uint32_t l0_k_steps_per_l1k = CeilDivU32(kL1TileK, kL0TileK);
+            const uint32_t l0_k_steps_per_mn_tile = CeilDivU32(problem_k, kL0TileK);
+            const uint64_t l0_k_steps_total =
+                static_cast<uint64_t>(mn_tiles) * static_cast<uint64_t>(l0_k_steps_per_mn_tile);
+            const Gmm1DetailProfileEnvelope &env = gmm1_detail_envelopes[expert];
+            os << "  expert=" << expert << " X=(" << current_m << "," << problem_k << ")"
+               << " W=(" << problem_k << "," << problem_n << ")"
+               << " Wpacked=(" << AlignUpU32(problem_k, 16U) << "," << AlignUpU32(problem_n, 32U) << ")"
+               << " C=(" << current_m << "," << problem_n << ")"
+               << " currentMRaw=" << current_m_raw << " groupBase=" << group_base
+               << " l1Tile=(" << kL1TileM << "," << kL1TileN << "," << kL1TileK << ")"
+               << " l0Tile=(" << kL0TileM << "," << kL0TileN << "," << kL0TileK << ")"
+               << " tileGrid=(" << tile_m << "," << tile_n << ")"
+               << " mnTiles=" << mn_tiles << " l1KBlocks=" << l1_k_blocks
+               << " l0KStepsPerL1K=" << l0_k_steps_per_l1k
+               << " l0KStepsPerMnTile=" << l0_k_steps_per_mn_tile
+               << " l0KStepsTotal=" << l0_k_steps_total;
+            if (!env.valid) {
+                os << " inactive\n";
+                group_base += current_m;
+                continue;
+            }
+            os << " active=" << env.active_entries
+               << " start_us=" << SysCntTicksToUs(env.start_min - kernel_start_min)
+               << " end_us=" << SysCntTicksToUs(env.end_max - kernel_start_min)
+               << " envelope_us=" << SysCntTicksToUs(env.end_max - env.start_min)
+               << " max_core_us=" << SysCntTicksToUs(env.max_core_ticks)
+               << " sum_core_us=" << SysCntTicksToUs(env.sum_core_ticks)
+               << " timedL1Tiles=" << env.l1_tile_count << " max_l1Tiles=" << env.max_l1_tile_count;
+            if (env.l1_tile_count != 0U) {
+                const double avg_l1_tile_us =
+                    SysCntTicksToUs(env.sum_core_ticks) / static_cast<double>(env.l1_tile_count);
+                os << " avg_l1_tile_us=" << avg_l1_tile_us;
+                if (l0_k_steps_per_mn_tile != 0U) {
+                    os << " derived_avg_l0k_step_us="
+                       << avg_l1_tile_us / static_cast<double>(l0_k_steps_per_mn_tile);
+                }
+            }
+            if (env.sum_core_ticks != 0U && cfg != nullptr) {
+                const double sum_core_us = SysCntTicksToUs(env.sum_core_ticks);
+                const double ops = 2.0 * static_cast<double>(current_m) * static_cast<double>(cfg->k) *
+                                   static_cast<double>(cfg->n);
+                os << " sum_core_tflops=" << (ops / sum_core_us / 1.0e6);
+            }
+            os << '\n';
+            group_base += current_m;
+        }
     }
 
     os << "rank=" << rank_id << " stageProfileCore\n";
@@ -664,6 +814,7 @@ bool RunOneRank(int rank_id, int world_size, const std::string &case_dir, const 
         kernel_times_us.reserve(static_cast<size_t>(measure_iters));
         e2e_times_us.reserve(static_cast<size_t>(measure_iters));
         std::vector<uint8_t> last_profile_host;
+        std::vector<int32_t> last_profile_expert_token_nums;
 
         TraceLog(rank_id, "pre-warmup barrier begin");
         CommMpiBarrier();
@@ -711,6 +862,14 @@ bool RunOneRank(int rank_id, int world_size, const std::string &case_dir, const 
             TraceLog(rank_id, "stage-profile iter post-launch barrier done");
             TraceLog(rank_id, "stage-profile iter read profile begin");
             ReadKernelProfileUs(profile_dev, build.block_dim, &last_profile_host);
+            last_profile_expert_token_nums.resize(cfg.expert_per_rank);
+            if (aclrtMemcpy(last_profile_expert_token_nums.data(),
+                            last_profile_expert_token_nums.size() * sizeof(int32_t),
+                            expert_token_nums_dev.ptr,
+                            last_profile_expert_token_nums.size() * sizeof(int32_t),
+                            ACL_MEMCPY_DEVICE_TO_HOST) != ACL_SUCCESS) {
+                throw std::runtime_error("device->host stage-profile expert_token_nums copy failed");
+            }
             TraceLog(rank_id, "stage-profile iter done");
         }
 
@@ -724,7 +883,8 @@ bool RunOneRank(int rank_id, int world_size, const std::string &case_dir, const 
         if (stage_profile) {
             if (!last_profile_host.empty()) {
                 PrintOrderedByRank(rank_id, world_size,
-                                   BuildStageProfileReportText(rank_id, last_profile_host, build.block_dim));
+                                   BuildStageProfileReportText(rank_id, last_profile_host, build.block_dim, &cfg,
+                                                               &last_profile_expert_token_nums));
             } else {
                 PrintOrderedByRank(rank_id, world_size,
                                    "rank=" + std::to_string(rank_id) + " stageProfile EMPTY profile_iter=0");

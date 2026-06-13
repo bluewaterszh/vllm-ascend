@@ -13,6 +13,10 @@ constexpr uint32_t DISPATCH_FFN_COMBINE_PROFILE_KERNEL_START = 0U;
 constexpr uint32_t DISPATCH_FFN_COMBINE_PROFILE_KERNEL_END = 1U;
 constexpr uint32_t DISPATCH_FFN_COMBINE_PROFILE_STAGE_BASE = 2U;
 constexpr uint32_t DISPATCH_FFN_COMBINE_PROFILE_STAGE_COUNT = 7U;
+constexpr uint32_t DISPATCH_FFN_COMBINE_PROFILE_GMM1_DETAIL_BASE =
+    DISPATCH_FFN_COMBINE_PROFILE_STAGE_BASE + DISPATCH_FFN_COMBINE_PROFILE_STAGE_COUNT * 2U;
+constexpr uint32_t DISPATCH_FFN_COMBINE_PROFILE_GMM1_DETAIL_FIELD_COUNT = 4U;
+constexpr uint32_t DISPATCH_FFN_COMBINE_PROFILE_GMM1_DETAIL_MAX_EXPERTS = 16U;
 constexpr uint32_t DISPATCH_FFN_COMBINE_PROFILE_ENTRY_U64_COUNT =
     DISPATCH_FFN_COMBINE_PROFILE_ENTRY_BYTES / sizeof(uint64_t);
 
@@ -35,6 +39,31 @@ constexpr uint32_t DispatchFFNCombineProfileStageEndIndex(uint32_t stage)
 {
     return DispatchFFNCombineProfileStageStartIndex(stage) + 1U;
 }
+
+constexpr uint32_t DispatchFFNCombineProfileGmm1DetailStartIndex(uint32_t expert)
+{
+    return DISPATCH_FFN_COMBINE_PROFILE_GMM1_DETAIL_BASE +
+           expert * DISPATCH_FFN_COMBINE_PROFILE_GMM1_DETAIL_FIELD_COUNT;
+}
+
+constexpr uint32_t DispatchFFNCombineProfileGmm1DetailEndIndex(uint32_t expert)
+{
+    return DispatchFFNCombineProfileGmm1DetailStartIndex(expert) + 1U;
+}
+
+constexpr uint32_t DispatchFFNCombineProfileGmm1DetailTotalIndex(uint32_t expert)
+{
+    return DispatchFFNCombineProfileGmm1DetailStartIndex(expert) + 2U;
+}
+
+constexpr uint32_t DispatchFFNCombineProfileGmm1DetailCountIndex(uint32_t expert)
+{
+    return DispatchFFNCombineProfileGmm1DetailStartIndex(expert) + 3U;
+}
+
+static_assert(DispatchFFNCombineProfileGmm1DetailCountIndex(
+                  DISPATCH_FFN_COMBINE_PROFILE_GMM1_DETAIL_MAX_EXPERTS - 1U) <
+              DISPATCH_FFN_COMBINE_PROFILE_ENTRY_U64_COUNT);
 
 struct DispatchFFNCombineLaunchArgs {
     void *x = nullptr;
