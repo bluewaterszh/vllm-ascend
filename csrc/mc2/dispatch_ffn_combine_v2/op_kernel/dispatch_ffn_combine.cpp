@@ -42,40 +42,40 @@ extern "C" __global__ __aicore__ void dispatch_ffn_combine(GM_ADDR x, GM_ADDR w1
     REGISTER_TILING_DEFAULT(DispatchFFNCombineTilingData);
     __gm__ DispatchFFNCombineTilingData *tilingData =
         reinterpret_cast<__gm__ DispatchFFNCombineTilingData *>(tilingGM);
-    if (startSyncDebug != 0U) {
-#ifdef HCCL_COMM
-        if (tilingData->runtimeInfo.symmetricPtr != 0) {
-            AscendC::SetHcclContext<HCCL_GROUP_ID_0>(
-                reinterpret_cast<__gm__ uint8_t *>(tilingData->runtimeInfo.symmetricPtr));
-        }
-        HcclShmem startSyncShmem;
-        startSyncShmem.initHccl(tilingData);
-#else
-        HcclShmem startSyncShmem;
-        startSyncShmem.initShmem(static_cast<GM_ADDR>(tilingData->runtimeInfo.symmetricPtr),
-                                 tilingData->runtimeInfo.rank, tilingData->runtimeInfo.rankSize);
-#endif
-        startSyncShmem.CrossRankStartSyncAiv();
-        startSyncShmem.CrossRankStartSyncAic();
-        AscendC::SyncAll<false>();
-        pipe_barrier(PIPE_ALL);
-    }
-    uint64_t tStart = get_sys_cnt();
-    if (profileEntry != nullptr) {
-        profileEntry[DISPATCH_FFN_COMBINE_PROFILE_KERNEL_START] = tStart;
-    }
     if (TILING_KEY_IS(DISPATCH_FFN_COMBINE_DEVICE_TILING_KEY)) {
         KERNEL_TASK_TYPE(DISPATCH_FFN_COMBINE_DEVICE_TILING_KEY, KERNEL_TYPE_MIX_AIC_1_2);
+        if (startSyncDebug != 0U) {
+#ifdef HCCL_COMM
+            if (tilingData->runtimeInfo.symmetricPtr != 0) {
+                AscendC::SetHcclContext<HCCL_GROUP_ID_0>(
+                    reinterpret_cast<__gm__ uint8_t *>(tilingData->runtimeInfo.symmetricPtr));
+            }
+            HcclShmem startSyncShmem;
+            startSyncShmem.initHccl(tilingData);
+#else
+            HcclShmem startSyncShmem;
+            startSyncShmem.initShmem(static_cast<GM_ADDR>(tilingData->runtimeInfo.symmetricPtr),
+                                     tilingData->runtimeInfo.rank, tilingData->runtimeInfo.rankSize);
+#endif
+            startSyncShmem.CrossRankStartSyncAiv();
+            startSyncShmem.CrossRankStartSyncAic();
+            AscendC::SyncAll<false>();
+            pipe_barrier(PIPE_ALL);
+        }
+        uint64_t tStart = get_sys_cnt();
+        if (profileEntry != nullptr) {
+            profileEntry[DISPATCH_FFN_COMBINE_PROFILE_KERNEL_START] = tStart;
+        }
         DispatchFFNCombine<int8_t, DTYPE_W1, DTYPE_OUT, false, true> op;
         op.Init(x, w1, w2, expertId, scale1, scale2, probs, xActiveMask, c, expertTokenNums, workspaceGM,
                 tilingGM, stageProfile != 0U ? reinterpret_cast<GM_ADDR>(profileEntry) : nullptr);
         op.Process();
-    }
 
-    pipe_barrier(PIPE_ALL);
-    uint64_t tEnd = get_sys_cnt();
-    if (profileEntry != nullptr) {
-        profileEntry[DISPATCH_FFN_COMBINE_PROFILE_KERNEL_END] = tEnd;
+        pipe_barrier(PIPE_ALL);
+        uint64_t tEnd = get_sys_cnt();
+        if (profileEntry != nullptr) {
+            profileEntry[DISPATCH_FFN_COMBINE_PROFILE_KERNEL_END] = tEnd;
+        }
     }
 }
 #endif
