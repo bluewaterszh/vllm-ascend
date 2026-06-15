@@ -283,6 +283,43 @@ const char *StageProfileName(uint32_t stage)
     return stage < DISPATCH_FFN_COMBINE_PROFILE_STAGE_COUNT ? kNames[stage] : "unknown";
 }
 
+const char *FrontDetailProfileName(uint32_t detail)
+{
+    static constexpr const char *kNames[DISPATCH_FFN_COMBINE_PROFILE_FRONT_DETAIL_COUNT] = {
+        "total",
+        "activeMask",
+        "initRouting",
+        "syncAfterInit",
+        "allgatherTotal",
+        "allgatherPublish",
+        "allgatherPublishLoad",
+        "allgatherPublishMark",
+        "allgatherPublishStore",
+        "allgatherRestoreTotal",
+        "allgatherWaitMarker",
+        "allgatherRestoreLoad",
+        "allgatherRestoreUnmark",
+        "allgatherPreSum",
+        "allgatherStorePreSum",
+        "allgatherFinalSync",
+        "cumsumTotal",
+        "cumsumLoad",
+        "cumsumVectorAdd",
+        "cumsumStore",
+        "prevSumRead",
+        "syncAfterCumsum",
+        "expertNumsCopy",
+        "notifyGmm1",
+        "dispatchSetupFlags",
+        "dispatchGroupSync",
+        "dispatchCopyTotal",
+        "combineTotal",
+        "unpermuteTotal",
+        "reserved",
+    };
+    return detail < DISPATCH_FFN_COMBINE_PROFILE_FRONT_DETAIL_COUNT ? kNames[detail] : "unknown";
+}
+
 const char *ProfileEntryKind(uint32_t profile_idx)
 {
     return profile_idx == 0U ? "aic" : "aiv";
@@ -330,6 +367,17 @@ struct Gmm1DetailProfileEnvelope {
     uint64_t max_l1_tile_count = 0;
 };
 
+struct DetailProfileEnvelope {
+    bool valid = false;
+    uint32_t active_entries = 0;
+    uint64_t start_min = 0;
+    uint64_t end_max = 0;
+    uint64_t max_core_ticks = 0;
+    uint64_t sum_core_ticks = 0;
+    uint64_t call_count = 0;
+    uint64_t max_call_count = 0;
+};
+
 uint32_t CeilDivU32(uint32_t value, uint32_t divisor)
 {
     return divisor == 0U ? 0U : (value + divisor - 1U) / divisor;
@@ -372,6 +420,24 @@ void UpdateGmm1DetailEnvelope(Gmm1DetailProfileEnvelope &env, uint64_t start, ui
     env.max_l1_tile_count = std::max(env.max_l1_tile_count, l1_tile_count);
 }
 
+void UpdateDetailEnvelope(DetailProfileEnvelope &env, uint64_t start, uint64_t end, uint64_t total,
+                          uint64_t count)
+{
+    if (!env.valid) {
+        env.valid = true;
+        env.start_min = start;
+        env.end_max = end;
+    } else {
+        env.start_min = std::min(env.start_min, start);
+        env.end_max = std::max(env.end_max, end);
+    }
+    env.active_entries += 1U;
+    env.max_core_ticks = std::max(env.max_core_ticks, total);
+    env.sum_core_ticks += total;
+    env.call_count += count;
+    env.max_call_count = std::max(env.max_call_count, count);
+}
+
 bool ProfileIntervalValid(const uint64_t *entry, uint32_t stage)
 {
     const uint64_t start = entry[DispatchFFNCombineProfileStageStartIndex(stage)];
@@ -384,6 +450,14 @@ bool Gmm1DetailProfileValid(const uint64_t *entry, uint32_t expert)
     const uint64_t start = entry[DispatchFFNCombineProfileGmm1DetailStartIndex(expert)];
     const uint64_t end = entry[DispatchFFNCombineProfileGmm1DetailEndIndex(expert)];
     const uint64_t count = entry[DispatchFFNCombineProfileGmm1DetailCountIndex(expert)];
+    return count != 0U && start != 0U && end != 0U && end >= start;
+}
+
+bool FrontDetailProfileValid(const uint64_t *entry, uint32_t detail)
+{
+    const uint64_t start = entry[DispatchFFNCombineProfileFrontDetailStartIndex(detail)];
+    const uint64_t end = entry[DispatchFFNCombineProfileFrontDetailEndIndex(detail)];
+    const uint64_t count = entry[DispatchFFNCombineProfileFrontDetailCountIndex(detail)];
     return count != 0U && start != 0U && end != 0U && end >= start;
 }
 
@@ -441,7 +515,10 @@ std::string BuildStageProfileReportText(int rank_id, const std::vector<uint8_t> 
     std::array<StageProfileEnvelope, DISPATCH_FFN_COMBINE_PROFILE_STAGE_COUNT> envelopes{};
     std::array<Gmm1DetailProfileEnvelope, DISPATCH_FFN_COMBINE_PROFILE_GMM1_DETAIL_MAX_EXPERTS>
         gmm1_detail_envelopes{};
+    std::array<DetailProfileEnvelope, DISPATCH_FFN_COMBINE_PROFILE_FRONT_DETAIL_COUNT>
+        front_detail_envelopes{};
     bool gmm1_detail_valid = false;
+    bool front_detail_valid = false;
     const uint32_t gmm1_profile_experts =
         cfg == nullptr ?
             DISPATCH_FFN_COMBINE_PROFILE_GMM1_DETAIL_MAX_EXPERTS :
@@ -483,6 +560,19 @@ std::string BuildStageProfileReportText(int rank_id, const std::vector<uint8_t> 
                     gmm1_detail_valid = true;
                 }
             }
+            if (profile_idx != 0U) {
+                for (uint32_t detail = 0; detail < DISPATCH_FFN_COMBINE_PROFILE_FRONT_DETAIL_COUNT; ++detail) {
+                    if (!FrontDetailProfileValid(entry, detail)) {
+                        continue;
+                    }
+                    const uint64_t start = entry[DispatchFFNCombineProfileFrontDetailStartIndex(detail)];
+                    const uint64_t end = entry[DispatchFFNCombineProfileFrontDetailEndIndex(detail)];
+                    const uint64_t total = entry[DispatchFFNCombineProfileFrontDetailTotalIndex(detail)];
+                    const uint64_t count = entry[DispatchFFNCombineProfileFrontDetailCountIndex(detail)];
+                    UpdateDetailEnvelope(front_detail_envelopes[detail], start, end, total, count);
+                    front_detail_valid = true;
+                }
+            }
         }
     }
 
@@ -505,6 +595,31 @@ std::string BuildStageProfileReportText(int rank_id, const std::vector<uint8_t> 
            << " end_us=" << SysCntTicksToUs(env.end_max - kernel_start_min)
            << " envelope_us=" << SysCntTicksToUs(env.end_max - env.start_min)
            << " max_core_us=" << SysCntTicksToUs(env.max_core_ticks) << '\n';
+    }
+
+    if (front_detail_valid) {
+        os << "rank=" << rank_id
+           << " frontStepDetailEnvelope base=syscnt_min_kernel_start active_aiv_only=1 fields=firstLastTotalCount"
+           << " nested_intervals=1\n";
+        for (uint32_t detail = 0; detail < DISPATCH_FFN_COMBINE_PROFILE_FRONT_DETAIL_COUNT; ++detail) {
+            const DetailProfileEnvelope &env = front_detail_envelopes[detail];
+            os << "  " << FrontDetailProfileName(detail);
+            if (!env.valid) {
+                os << " inactive\n";
+                continue;
+            }
+            os << " active=" << env.active_entries
+               << " start_us=" << SysCntTicksToUs(env.start_min - kernel_start_min)
+               << " end_us=" << SysCntTicksToUs(env.end_max - kernel_start_min)
+               << " envelope_us=" << SysCntTicksToUs(env.end_max - env.start_min)
+               << " max_core_us=" << SysCntTicksToUs(env.max_core_ticks)
+               << " sum_core_us=" << SysCntTicksToUs(env.sum_core_ticks)
+               << " count=" << env.call_count << " max_count=" << env.max_call_count;
+            if (env.call_count != 0U) {
+                os << " avg_call_us=" << SysCntTicksToUs(env.sum_core_ticks) / static_cast<double>(env.call_count);
+            }
+            os << '\n';
+        }
     }
 
     if (gmm1_detail_valid) {
