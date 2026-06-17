@@ -59,7 +59,6 @@ extern "C" __global__ __aicore__ void dispatch_ffn_combine(GM_ADDR x, GM_ADDR w1
 #endif
             startSyncShmem.CrossRankStartSyncAiv();
             startSyncShmem.CrossRankStartSyncAic();
-            AscendC::SyncAll<false>();
             pipe_barrier(PIPE_ALL);
         }
         uint64_t tStart = get_sys_cnt();
