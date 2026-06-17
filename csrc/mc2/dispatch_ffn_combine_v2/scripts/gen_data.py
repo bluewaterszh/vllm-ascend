@@ -161,11 +161,11 @@ def make_probs(rank: int, args: argparse.Namespace) -> np.ndarray:
 
 
 def make_expert_idx(rank: int, args: argparse.Namespace) -> np.ndarray:
-    del rank
     total_experts = args.world_size * args.experts
     if total_experts <= 0:
         raise ValueError("total_experts must be positive")
-    base = np.arange(args.m, dtype=np.int32)[:, None] * args.topk + np.arange(args.topk, dtype=np.int32)[None, :]
+    global_token = rank * args.m + np.arange(args.m, dtype=np.int32)
+    base = global_token[:, None] * args.topk + np.arange(args.topk, dtype=np.int32)[None, :]
     return (base % total_experts).astype(np.int32)
 
 

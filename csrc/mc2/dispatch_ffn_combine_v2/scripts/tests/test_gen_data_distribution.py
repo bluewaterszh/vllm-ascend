@@ -42,7 +42,7 @@ def route_counts(args: argparse.Namespace) -> tuple[list[int], list[int]]:
 
 class GenDataDistributionTest(unittest.TestCase):
     def test_global_token_round_robin_assigns_consecutive_topk_experts(self) -> None:
-        args = make_args(world_size=8, m=16)
+        args = make_args(world_size=16, m=16)
 
         rank0 = gen_data.make_expert_idx(0, args)
         rank1 = gen_data.make_expert_idx(1, args)
@@ -50,7 +50,15 @@ class GenDataDistributionTest(unittest.TestCase):
         self.assertEqual(rank0[0].tolist(), list(range(0, 8)))
         self.assertEqual(rank0[1].tolist(), list(range(8, 16)))
         self.assertEqual(rank0[2].tolist(), list(range(16, 24)))
-        self.assertEqual(rank1[0].tolist(), list(range(0, 8)))
+        self.assertEqual(rank1[0].tolist(), list(range(128, 136)))
+
+    def test_global_token_round_robin_balances_16_rank_m16_case(self) -> None:
+        args = make_args(world_size=16, m=16)
+
+        expert_counts, dst_rank_counts = route_counts(args)
+
+        self.assertEqual(set(expert_counts), {8})
+        self.assertEqual(dst_rank_counts, [128] * 16)
 
     def test_global_token_round_robin_balances_target_8_rank_cases(self) -> None:
         for m in (16, 128, 2048):
