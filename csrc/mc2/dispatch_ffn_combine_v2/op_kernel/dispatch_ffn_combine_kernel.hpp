@@ -258,60 +258,6 @@ private:
         RecordProfile(params, DISPATCH_FFN_COMBINE_PROFILE_STAGE_BASE + stage * 2U + 1U);
     }
 
-    CATLASS_DEVICE uint64_t ProfileNow(Params const &params) const
-    {
-        return params.profileEntryGM == nullptr ? 0U : get_sys_cnt();
-    }
-
-    CATLASS_DEVICE void RecordGmm1L1TileProfile(Params const &params, uint32_t groupIdx, uint64_t start,
-                                                uint64_t end, uint64_t l1TileCount) const
-    {
-        if (params.profileEntryGM == nullptr || start == 0U || end < start ||
-            groupIdx >= DISPATCH_FFN_COMBINE_PROFILE_GMM1_DETAIL_MAX_EXPERTS) {
-            return;
-        }
-        const uint32_t base = DISPATCH_FFN_COMBINE_PROFILE_GMM1_DETAIL_BASE +
-                              groupIdx * DISPATCH_FFN_COMBINE_PROFILE_GMM1_DETAIL_FIELD_COUNT;
-        if (base + DISPATCH_FFN_COMBINE_PROFILE_GMM1_DETAIL_FIELD_COUNT >
-            DISPATCH_FFN_COMBINE_PROFILE_ENTRY_U64_COUNT) {
-            return;
-        }
-        volatile __gm__ uint64_t *profileEntry =
-            reinterpret_cast<volatile __gm__ uint64_t *>(params.profileEntryGM);
-        if (profileEntry[base + 3U] == 0U) {
-            if (l1TileCount == 0U) {
-                return;
-            }
-            profileEntry[base] = start;
-        }
-        profileEntry[base + 1U] = end;
-        profileEntry[base + 2U] += end - start;
-        profileEntry[base + 3U] += l1TileCount;
-    }
-
-    CATLASS_DEVICE void RecordFrontDetailProfile(Params const &params, uint32_t detail, uint64_t start,
-                                                 uint64_t end) const
-    {
-        if (params.profileEntryGM == nullptr || start == 0U || end < start ||
-            detail >= DISPATCH_FFN_COMBINE_PROFILE_FRONT_DETAIL_COUNT) {
-            return;
-        }
-        const uint32_t base = DISPATCH_FFN_COMBINE_PROFILE_FRONT_DETAIL_BASE +
-                              detail * DISPATCH_FFN_COMBINE_PROFILE_FRONT_DETAIL_FIELD_COUNT;
-        if (base + DISPATCH_FFN_COMBINE_PROFILE_FRONT_DETAIL_FIELD_COUNT >
-            DISPATCH_FFN_COMBINE_PROFILE_ENTRY_U64_COUNT) {
-            return;
-        }
-        volatile __gm__ uint64_t *profileEntry =
-            reinterpret_cast<volatile __gm__ uint64_t *>(params.profileEntryGM);
-        if (profileEntry[base + 3U] == 0U) {
-            profileEntry[base] = start;
-        }
-        profileEntry[base + 1U] = end;
-        profileEntry[base + 2U] += end - start;
-        profileEntry[base + 3U] += 1U;
-    }
-
     CATLASS_DEVICE void initBuffer(Params const &params) {
         #ifndef HCCL_COMM
             shmem.initShmem(params.symmetricPtr, params.rank, params.rankSize);
@@ -486,13 +432,11 @@ private:
                            AscendC::GlobalTensor<int32_t> & result, uint32_t expertPerRank, uint32_t rankId,
                            uint32_t EP)
     {
-        const uint64_t profileStart = ProfileNow(params);
         int32_t expertPerRankAligned = (expertPerRank + 8 - 1) / 8 * 8;
         AscendC::LocalTensor<int32_t> tmpBuffer1 = resource.ubBuf.template GetBufferByByte<int32_t>(0);
         AscendC::LocalTensor<int32_t> tmpResult = resource.ubBuf.template GetBufferByByte<int32_t>(EP * expertPerRank * sizeof(int32_t));
         #define U16(x) static_cast<uint16_t>(x)
 
-        uint64_t stepStart = ProfileNow(params);
         AscendC::DataCopyPad(
             tmpBuffer1,
             tokenPerExpert[rankId * expertPerRank],
@@ -502,18 +446,12 @@ private:
 
         AscendC::SetFlag<AscendC::HardEvent::MTE2_V>(EVENT_ID0);
         AscendC::WaitFlag<AscendC::HardEvent::MTE2_V>(EVENT_ID0);
-        RecordFrontDetailProfile(params, DISPATCH_FFN_COMBINE_PROFILE_FRONT_DETAIL_CUMSUM_LOAD, stepStart,
-                                 ProfileNow(params));
 
-        stepStart = ProfileNow(params);
         for (uint32_t i = 1; i < EP; ++i) {
             AscendC::Add(tmpBuffer1[i * expertPerRankAligned], tmpBuffer1[i * expertPerRankAligned], tmpBuffer1[(i - 1) * expertPerRankAligned], expertPerRank);
             AscendC::PipeBarrier<PIPE_V>();
         }
-        RecordFrontDetailProfile(params, DISPATCH_FFN_COMBINE_PROFILE_FRONT_DETAIL_CUMSUM_VECTOR_ADD, stepStart,
-                                 ProfileNow(params));
 
-        stepStart = ProfileNow(params);
         AscendC::SetFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID0);
         AscendC::WaitFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID0);
 
@@ -522,10 +460,6 @@ private:
             tmpBuffer1,
             {U16(EP), U16((expertPerRank) * sizeof(int32_t)), 0, 0}
         );
-        RecordFrontDetailProfile(params, DISPATCH_FFN_COMBINE_PROFILE_FRONT_DETAIL_CUMSUM_STORE, stepStart,
-                                 ProfileNow(params));
-        RecordFrontDetailProfile(params, DISPATCH_FFN_COMBINE_PROFILE_FRONT_DETAIL_CUMSUM_TOTAL, profileStart,
-                                 ProfileNow(params));
 #undef U16
     }
 
@@ -542,7 +476,6 @@ private:
         int64_t gmGroupOffsetC = 0;
         uint32_t startCoreIdx = 0;
         uint32_t syncGroupIdx = 0;
-        uint32_t lastProfileGroupWithTile = params.expertPerRank;
         int64_t preCurrentmSum = 0;
         int32_t syncLoopIdx = -1;
 
@@ -575,11 +508,6 @@ private:
             // Determine the starting loopIdx of the current core under the current groupIdx
             uint32_t startLoopIdx = ((coreIdx < startCoreIdx) ? (coreIdx + coreNum) : coreIdx) - startCoreIdx;
             // Loop through the matmul of each groupIdx
-            uint32_t assignedTileCount = 0;
-            if (params.profileEntryGM != nullptr && currentM > 0 && startLoopIdx < coreLoops) {
-                assignedTileCount = (coreLoops - 1U - startLoopIdx) / coreNum + 1U;
-            }
-            uint64_t l1TileProfileStart = 0U;
 
             for (uint32_t loopIdx = startLoopIdx; loopIdx < coreLoops; loopIdx += coreNum) {
                 for(;syncGroupIdx <= groupIdx; syncGroupIdx++) {
@@ -599,9 +527,6 @@ private:
                 int64_t gmOffsetC = layoutC.GetOffset(offsetC);
                 int64_t gmOffsetS = blockCoord.n() * L1TileShape::N + (params.listLen == 1 ? groupIdx * params.problemShape.n() : 0);
                 if (currentM > 0) {
-                    if (params.profileEntryGM != nullptr && l1TileProfileStart == 0U) {
-                        l1TileProfileStart = ProfileNow(params);
-                    }
                     blockMmad(
                         gmA[gmGroupOffsetA + gmOffsetA], layoutA,
                         gmB1[gmGroupOffsetB + gmOffsetB], layoutB1,
@@ -611,24 +536,11 @@ private:
                     );
                 }
             }
-            if (params.profileEntryGM != nullptr && assignedTileCount != 0U && l1TileProfileStart != 0U) {
-                RecordGmm1L1TileProfile(params, groupIdx, l1TileProfileStart, ProfileNow(params), assignedTileCount);
-                lastProfileGroupWithTile = groupIdx;
-            }
  
             if ((groupIdx + 1) == params.epilogueGranularity  && (groupIdx < params.expertPerRank - 1)) {
                 syncLoopIdx ++;
                 if constexpr (BlockMmad::DispatchPolicy::ASYNC) {
-                    uint64_t drainProfileStart =
-                        (params.profileEntryGM == nullptr || lastProfileGroupWithTile == params.expertPerRank) ?
-                            0U :
-                            ProfileNow(params);
                     blockMmad.SynchronizeBlock();
-                    if (params.profileEntryGM != nullptr && lastProfileGroupWithTile != params.expertPerRank) {
-                        RecordGmm1L1TileProfile(params, lastProfileGroupWithTile, drainProfileStart,
-                                                ProfileNow(params), 0U);
-                        lastProfileGroupWithTile = params.expertPerRank;
-                    }
                 }
                 // Synchronization signal: GMM1 notifies SwiGLU [1]
                 blockMmad.Finalize(syncLoopIdx, SYNCFLAGC2V);
@@ -649,15 +561,7 @@ private:
         }
 
         if constexpr (BlockMmad::DispatchPolicy::ASYNC) {
-            uint64_t drainProfileStart =
-                (params.profileEntryGM == nullptr || lastProfileGroupWithTile == params.expertPerRank) ?
-                    0U :
-                    ProfileNow(params);
             blockMmad.SynchronizeBlock();
-            if (params.profileEntryGM != nullptr && lastProfileGroupWithTile != params.expertPerRank) {
-                RecordGmm1L1TileProfile(params, lastProfileGroupWithTile, drainProfileStart, ProfileNow(params), 0U);
-                lastProfileGroupWithTile = params.expertPerRank;
-            }
         }
         // Synchronization signal: GMM1 notifies SwiGLU [2]
         blockMmad.Finalize(syncLoopIdx + 1, SYNCFLAGC2V);
@@ -781,13 +685,11 @@ private:
 
     CATLASS_DEVICE
     void CrossRankSyncAndlocalTokenPerExpertAllGatherAndGetSumPreRankV2(Params const &params, int64_t localTokenPerExpertOffset){
-        const uint64_t profileStart = ProfileNow(params);
         uint32_t numPerCore = paddedExpertNumAligned;
         AscendC::LocalTensor<int32_t> tmpBuffer = resource.ubBuf.template GetBufferByByte<int32_t>(0);
         AscendC::LocalTensor<int32_t> prevSumBuf = tmpBuffer[numPerCore];
 
         for(int32_t dstEpIdx = coreIdx; dstEpIdx < params.EP; dstEpIdx += coreNum) {
-            const uint64_t publishStart = ProfileNow(params);
             if (dstEpIdx == params.rank) {
                 continue;
             }
@@ -806,67 +708,42 @@ private:
             
             AscendC::WaitFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID0);
             
-            uint64_t stepStart = ProfileNow(params);
             copyGmToUb(tmpBuffer, srcAddress[0], 
                 layout::RowMajor{ 1, numPerCore}, 
                 layout::RowMajor{1, numPerCore});
 
             AscendC::SetFlag<AscendC::HardEvent::MTE2_V>(EVENT_ID0);
             AscendC::WaitFlag<AscendC::HardEvent::MTE2_V>(EVENT_ID0);
-            RecordFrontDetailProfile(params, DISPATCH_FFN_COMBINE_PROFILE_FRONT_DETAIL_ALLGATHER_PUBLISH_LOAD,
-                                     stepStart, ProfileNow(params));
-            stepStart = ProfileNow(params);
             AscendC::Adds(tmpBuffer, tmpBuffer, 0x800000, numPerCore);
             AscendC::SetFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID0);
             AscendC::WaitFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID0);
-            RecordFrontDetailProfile(params, DISPATCH_FFN_COMBINE_PROFILE_FRONT_DETAIL_ALLGATHER_PUBLISH_MARK,
-                                     stepStart, ProfileNow(params));
-            stepStart = ProfileNow(params);
             copyUbToGm(dstAddress[0], tmpBuffer, 
                 layout::RowMajor{ 1, numPerCore}, 
                 layout::RowMajor{1, numPerCore});
             AscendC::SetFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID0);
             AscendC::WaitFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID0);
-            RecordFrontDetailProfile(params, DISPATCH_FFN_COMBINE_PROFILE_FRONT_DETAIL_ALLGATHER_PUBLISH_STORE,
-                                     stepStart, ProfileNow(params));
-            RecordFrontDetailProfile(params, DISPATCH_FFN_COMBINE_PROFILE_FRONT_DETAIL_ALLGATHER_PUBLISH,
-                                     publishStart, ProfileNow(params));
         }
         for(int32_t dstEpIdx = coreIdx; dstEpIdx < params.EP; dstEpIdx += coreNum) {
-            const uint64_t restoreStart = ProfileNow(params);
             if (dstEpIdx != params.rank) {
-                uint64_t stepStart = ProfileNow(params);
                 int32_t intPer512 = CACHE_LINE / sizeof(int);
                 for(int32_t checkIdx = 0; checkIdx < paddedExpertNumAligned; checkIdx += intPer512) {
                     __gm__ int32_t* sync_check = reinterpret_cast<__gm__ int32_t*>(shmem() + peermemInfo.offsetPeerTokenPerExpert) + tokenPerExpertLayout(dstEpIdx, 0, checkIdx);
                     gm_signal_wait_until_ne(sync_check, 0);
                 }
-                RecordFrontDetailProfile(params, DISPATCH_FFN_COMBINE_PROFILE_FRONT_DETAIL_ALLGATHER_WAIT_MARKER,
-                                         stepStart, ProfileNow(params));
-                stepStart = ProfileNow(params);
                 AscendC::DataCopy(tmpBuffer, tokenPerExpert[tokenPerExpertLayout(dstEpIdx, 0, 0)], numPerCore);
                 AscendC::SetFlag<AscendC::HardEvent::MTE2_V>(EVENT_ID0);
                 AscendC::WaitFlag<AscendC::HardEvent::MTE2_V>(EVENT_ID0);
-                RecordFrontDetailProfile(params, DISPATCH_FFN_COMBINE_PROFILE_FRONT_DETAIL_ALLGATHER_RESTORE_LOAD,
-                                         stepStart, ProfileNow(params));
-                stepStart = ProfileNow(params);
                 AscendC::Adds(tmpBuffer, tmpBuffer, -0x800000, numPerCore);
                 AscendC::PipeBarrier<PIPE_V>();
                 AscendC::SetFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID0);
                 AscendC::WaitFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID0);
                 AscendC::DataCopy(tokenPerExpert[tokenPerExpertLayout(dstEpIdx, 0, 0)], tmpBuffer, numPerCore);
-                RecordFrontDetailProfile(params, DISPATCH_FFN_COMBINE_PROFILE_FRONT_DETAIL_ALLGATHER_RESTORE_UNMARK,
-                                         stepStart, ProfileNow(params));
             } else {
-                const uint64_t stepStart = ProfileNow(params);
                 AscendC::DataCopy(tmpBuffer, tokenPerExpert[tokenPerExpertLayout(dstEpIdx, 0, 0)], numPerCore);
                 AscendC::SetFlag<AscendC::HardEvent::MTE2_V>(EVENT_ID0);
                 AscendC::WaitFlag<AscendC::HardEvent::MTE2_V>(EVENT_ID0);
-                RecordFrontDetailProfile(params, DISPATCH_FFN_COMBINE_PROFILE_FRONT_DETAIL_ALLGATHER_RESTORE_LOAD,
-                                         stepStart, ProfileNow(params));
             }
             AscendC::PipeBarrier<PIPE_ALL>();
-            uint64_t stepStart = ProfileNow(params);
             int32_t prevSum = 0;
             int32_t j = 0;
             for (int32_t i = 0; i < (params.rank + 1) * params.expertPerRank; i++) {
@@ -876,25 +753,13 @@ private:
                 }
                 prevSum += tmpBuffer(i);
             }
-            RecordFrontDetailProfile(params, DISPATCH_FFN_COMBINE_PROFILE_FRONT_DETAIL_ALLGATHER_PRESUM, stepStart,
-                                     ProfileNow(params));
-            stepStart = ProfileNow(params);
             AscendC::SetFlag<AscendC::HardEvent::S_MTE3>(EVENT_ID0);
             AscendC::WaitFlag<AscendC::HardEvent::S_MTE3>(EVENT_ID0);
             AscendC::DataCopyPad(preSumBeforeRank[dstEpIdx * params.expertPerRank], prevSumBuf,
             AscendC::DataCopyParams{1, static_cast<uint16_t>(params.expertPerRank * sizeof(int32_t)), 0, 0});
-            RecordFrontDetailProfile(params, DISPATCH_FFN_COMBINE_PROFILE_FRONT_DETAIL_ALLGATHER_STORE_PRESUM,
-                                     stepStart, ProfileNow(params));
-            RecordFrontDetailProfile(params, DISPATCH_FFN_COMBINE_PROFILE_FRONT_DETAIL_ALLGATHER_RESTORE_TOTAL,
-                                     restoreStart, ProfileNow(params));
         }
 
-        const uint64_t syncStart = ProfileNow(params);
         AscendC::SyncAll<true>();
-        RecordFrontDetailProfile(params, DISPATCH_FFN_COMBINE_PROFILE_FRONT_DETAIL_ALLGATHER_FINAL_SYNC, syncStart,
-                                 ProfileNow(params));
-        RecordFrontDetailProfile(params, DISPATCH_FFN_COMBINE_PROFILE_FRONT_DETAIL_ALLGATHER_TOTAL, profileStart,
-                                 ProfileNow(params));
     }
 
     CATLASS_DEVICE
@@ -964,27 +829,17 @@ private:
         uint32_t expandedRowIdxOffset = AlignUp(params.problemShape.m(), 256) * params.topK * sizeof(int32_t);
 
         RecordStageStart(params, DISPATCH_FFN_COMBINE_PROFILE_STAGE_FRONT);
-        const uint64_t frontProfileStart = ProfileNow(params);
-        uint64_t stepStart = ProfileNow(params);
         ApplyXActiveMask(params);
-        RecordFrontDetailProfile(params, DISPATCH_FFN_COMBINE_PROFILE_FRONT_DETAIL_ACTIVE_MASK, stepStart,
-                                 ProfileNow(params));
 
         //---initRouting------
-        stepStart = ProfileNow(params);
         moe_init_routing_quant_v2<ElementD2>(reinterpret_cast<GM_ADDR> (params.ptrA), params.expertIdx, 
         params.moeInitRoutingQuantV2Scale, params.moeInitRoutingQuantV2Offset, shmem() + peermemInfo.offsetA, 
         workspaceInfo.expandedRowIdx, localTokenPerExpert, params.expertTokensBeforeCapacity, 
         shmem() + peermemInfo.offsetPeerPerTokenScale, 
         params.ptrWorkspace + expandedRowIdxOffset, 
         &params.moeInitRoutingQuantV2TilingData, params.initRoutingQuantTilingKey);
-        RecordFrontDetailProfile(params, DISPATCH_FFN_COMBINE_PROFILE_FRONT_DETAIL_INIT_ROUTING, stepStart,
-                                 ProfileNow(params));
 
-        stepStart = ProfileNow(params);
         AscendC::SyncAll<true>();
-        RecordFrontDetailProfile(params, DISPATCH_FFN_COMBINE_PROFILE_FRONT_DETAIL_SYNC_AFTER_INIT, stepStart,
-                                 ProfileNow(params));
 
         CrossRankSyncAndlocalTokenPerExpertAllGatherAndGetSumPreRankV2(params, localTokenPerExpertOffset);
 
@@ -995,34 +850,20 @@ private:
         uint32_t curGroupOffset = 0;
         int32_t prevSumBeforeRank = 0;
         int32_t prevSum = 0;
-        stepStart = ProfileNow(params);
         if (coreIdx < params.EP) {
             prevSum = preSumBeforeRank(coreIdx * params.expertPerRank);
         }
-        RecordFrontDetailProfile(params, DISPATCH_FFN_COMBINE_PROFILE_FRONT_DETAIL_PREV_SUM_READ, stepStart,
-                                 ProfileNow(params));
-        stepStart = ProfileNow(params);
         AscendC::SyncAll<true>();
-        RecordFrontDetailProfile(params, DISPATCH_FFN_COMBINE_PROFILE_FRONT_DETAIL_SYNC_AFTER_CUMSUM, stepStart,
-                                 ProfileNow(params));
         
         AscendC::GlobalTensor<int32_t> ExpertTokenNums;
         ExpertTokenNums.SetGlobalBuffer(reinterpret_cast<__gm__ int32_t*>(params.ptrExpertTokenNums));
-        stepStart = ProfileNow(params);
         if(coreIdx == 0)
         {
             CopyGMToGM(ExpertTokenNums, cumsumMM[(params.EP - 1) * params.expertPerRank], params.expertPerRank, params.ubMoveNum);
         }
-        RecordFrontDetailProfile(params, DISPATCH_FFN_COMBINE_PROFILE_FRONT_DETAIL_EXPERT_NUMS_COPY, stepStart,
-                                 ProfileNow(params));
-        stepStart = ProfileNow(params);
         uint16_t syncgmm1Idx = 0;
         AscendC::CrossCoreSetFlag<0x2, PIPE_MTE3>(syncgmm1Idx / CROSS_CORE_FLAG_MAX_SET_COUNT);
         syncgmm1Idx++;
-        RecordFrontDetailProfile(params, DISPATCH_FFN_COMBINE_PROFILE_FRONT_DETAIL_NOTIFY_GMM1, stepStart,
-                                 ProfileNow(params));
-        RecordFrontDetailProfile(params, DISPATCH_FFN_COMBINE_PROFILE_FRONT_DETAIL_TOTAL, frontProfileStart,
-                                 ProfileNow(params));
         RecordStageEnd(params, DISPATCH_FFN_COMBINE_PROFILE_STAGE_FRONT);
 
         uint32_t prevGroupSum1 = 0, dequantSum1 = 0, dequantSum2 = 0;
@@ -1030,14 +871,10 @@ private:
 
         RecordStageStart(params, DISPATCH_FFN_COMBINE_PROFILE_STAGE_DISPATCH);
         icache_preload(8);
-        stepStart = ProfileNow(params);
         AscendC::SetFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID0);
         AscendC::SetFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID1);
-        RecordFrontDetailProfile(params, DISPATCH_FFN_COMBINE_PROFILE_FRONT_DETAIL_DISPATCH_SETUP_FLAGS,
-                                 stepStart, ProfileNow(params));
         int32_t pingpongIdx = 0;
         for (int32_t groupIdx = 0; groupIdx < params.expertPerRank; ++groupIdx) {
-            const uint64_t copyStart = ProfileNow(params);
             // The ith core reads data from the ith rank's peermem
             uint32_t currentM = cumsumMM((params.EP - 1) * params.expertPerRank + groupIdx);
             for(int32_t dstEpIdx = coreIdx; dstEpIdx < params.EP; dstEpIdx += coreNum) {
@@ -1060,14 +897,9 @@ private:
                 }
 
             }
-            RecordFrontDetailProfile(params, DISPATCH_FFN_COMBINE_PROFILE_FRONT_DETAIL_DISPATCH_COPY_TOTAL,
-                                     copyStart, ProfileNow(params));
-            stepStart = ProfileNow(params);
             AscendC::SyncAll<true>();
             AscendC::CrossCoreSetFlag<0x2, PIPE_MTE3>(syncgmm1Idx / CROSS_CORE_FLAG_MAX_SET_COUNT);
             syncgmm1Idx ++;
-            RecordFrontDetailProfile(params, DISPATCH_FFN_COMBINE_PROFILE_FRONT_DETAIL_DISPATCH_GROUP_SYNC,
-                                     stepStart, ProfileNow(params));
 
             prevGroupSum1 += currentM;
 
@@ -1160,7 +992,6 @@ private:
         blockEpilogue1.Finalize();
         RecordStageEnd(params, DISPATCH_FFN_COMBINE_PROFILE_STAGE_SWIGLU);
         RecordStageStart(params, DISPATCH_FFN_COMBINE_PROFILE_STAGE_COMBINE);
-        stepStart = ProfileNow(params);
         if (isCombineV1) {
             blockEpilogue2.SetFlag();
             CombineV1(params, blockEpilogue2);
@@ -1172,19 +1003,14 @@ private:
         ResetTokenPerExpert(params.EP * paddedExpertNumAligned);
 
         shmem.CrossRankSync();
-        RecordFrontDetailProfile(params, DISPATCH_FFN_COMBINE_PROFILE_FRONT_DETAIL_COMBINE_TOTAL, stepStart,
-                                 ProfileNow(params));
         RecordStageEnd(params, DISPATCH_FFN_COMBINE_PROFILE_STAGE_COMBINE);
 
         RecordStageStart(params, DISPATCH_FFN_COMBINE_PROFILE_STAGE_UNPERMUTE);
-        stepStart = ProfileNow(params);
         MoeTokenUnpermuteTilingData tilingData;
         MoeTokenUnpermuteTiling(params.problemShape.m() * params.topK, n2, params.topK, tilingData, coreNum);
         KernelMoeTokenUnpermute<ElementD2, int32_t, float, true> kernelMoeTokenUnpermuteOp;
         kernelMoeTokenUnpermuteOp.Init(shmem() + peermemInfo.offsetD, workspaceInfo.expandedRowIdx, params.probs, reinterpret_cast<GM_ADDR>(params.ptrOutput), &tilingData);
         kernelMoeTokenUnpermuteOp.Process();
-        RecordFrontDetailProfile(params, DISPATCH_FFN_COMBINE_PROFILE_FRONT_DETAIL_UNPERMUTE_TOTAL, stepStart,
-                                 ProfileNow(params));
         RecordStageEnd(params, DISPATCH_FFN_COMBINE_PROFILE_STAGE_UNPERMUTE);
     }
 
