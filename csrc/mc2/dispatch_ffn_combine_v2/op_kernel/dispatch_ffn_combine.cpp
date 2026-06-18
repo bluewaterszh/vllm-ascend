@@ -16,6 +16,7 @@
 #if !defined(__CCE_KT_TEST__) && defined(__CCE_AICORE__)
 #include "lib/matmul_intf.h"
 #include "dispatch_ffn_combine_tiling.h"
+#include "profile_debug_config.h"
 #include "dispatch_ffn_combine.h"
 #endif
 #include "../kernel_launch.hpp"
@@ -44,6 +45,7 @@ extern "C" __global__ __aicore__ void dispatch_ffn_combine(GM_ADDR x, GM_ADDR w1
         reinterpret_cast<__gm__ DispatchFFNCombineTilingData *>(tilingGM);
     if (TILING_KEY_IS(DISPATCH_FFN_COMBINE_DEVICE_TILING_KEY)) {
         KERNEL_TASK_TYPE(DISPATCH_FFN_COMBINE_DEVICE_TILING_KEY, KERNEL_TYPE_MIX_AIC_1_2);
+#if DISPATCH_FFN_COMBINE_V2_ENABLE_DEVICE_DEBUG
         if (startSyncDebug != 0U) {
 #ifdef HCCL_COMM
             if (tilingData->runtimeInfo.symmetricPtr != 0) {
@@ -61,13 +63,22 @@ extern "C" __global__ __aicore__ void dispatch_ffn_combine(GM_ADDR x, GM_ADDR w1
             startSyncShmem.CrossRankStartSyncAic();
             pipe_barrier(PIPE_ALL);
         }
+#else
+        (void)startSyncDebug;
+#endif
         uint64_t tStart = get_sys_cnt();
         if (profileEntry != nullptr) {
             profileEntry[DISPATCH_FFN_COMBINE_PROFILE_KERNEL_START] = tStart;
         }
         DispatchFFNCombine<int8_t, DTYPE_W1, DTYPE_OUT, false, true> op;
+#if DISPATCH_FFN_COMBINE_V2_ENABLE_INNER_PROFILE
+        GM_ADDR stageProfileEntryGM = stageProfile != 0U ? reinterpret_cast<GM_ADDR>(profileEntry) : nullptr;
+#else
+        (void)stageProfile;
+        GM_ADDR stageProfileEntryGM = nullptr;
+#endif
         op.Init(x, w1, w2, expertId, scale1, scale2, probs, xActiveMask, c, expertTokenNums, workspaceGM,
-                tilingGM, stageProfile != 0U ? reinterpret_cast<GM_ADDR>(profileEntry) : nullptr);
+                tilingGM, stageProfileEntryGM);
         op.Process();
 
         pipe_barrier(PIPE_ALL);

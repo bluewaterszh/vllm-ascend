@@ -71,6 +71,13 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+COMPILE_INNER_PROFILE=${DISPATCH_FFN_COMBINE_V2_COMPILE_INNER_PROFILE:-${STAGE_PROFILE}}
+DEVICE_DEBUG_REQUESTED=0
+if [[ "${START_SYNC_DEBUG}" != "0" ]]; then
+  DEVICE_DEBUG_REQUESTED=1
+fi
+COMPILE_DEVICE_DEBUG=${DISPATCH_FFN_COMBINE_V2_COMPILE_DEVICE_DEBUG:-${DEVICE_DEBUG_REQUESTED}}
+
 if [[ "${WORLD_SIZE}" == "2" && -z "${ASCEND_RT_VISIBLE_DEVICES:-}" ]]; then
   export ASCEND_RT_VISIBLE_DEVICES=0,1
 fi
@@ -122,6 +129,8 @@ echo "HCCL_BUFFSIZE=${HCCL_BUFFSIZE:-200}"
 echo "SKIP_BUILD=${SKIP_BUILD}"
 echo "TRACE=${TRACE}"
 echo "START_SYNC_DEBUG=${START_SYNC_DEBUG}"
+echo "COMPILE_INNER_PROFILE=${COMPILE_INNER_PROFILE}"
+echo "COMPILE_DEVICE_DEBUG=${COMPILE_DEVICE_DEBUG}"
 echo "DISPATCH_FFN_COMBINE_V2_TRACE_FILE_DIR=${DISPATCH_FFN_COMBINE_V2_TRACE_FILE_DIR}"
 
 python3 "${SCRIPT_DIR}/scripts/gen_data.py" \
@@ -143,7 +152,9 @@ if [[ "${SKIP_BUILD}" == "0" ]]; then
     "${BUILD_DIR}/CMakeFiles/dispatch_ffn_combine_v2_kernel_host_stub_obj.dir" \
     "${BUILD_DIR}/lib/libdispatch_ffn_combine_v2_kernel.so"
 
-  cmake -S "${SCRIPT_DIR}" -B "${BUILD_DIR}" -DSOC_VERSION="${SOC}"
+  cmake -S "${SCRIPT_DIR}" -B "${BUILD_DIR}" -DSOC_VERSION="${SOC}" \
+    -DDISPATCH_FFN_COMBINE_V2_ENABLE_INNER_PROFILE="${COMPILE_INNER_PROFILE}" \
+    -DDISPATCH_FFN_COMBINE_V2_ENABLE_DEVICE_DEBUG="${COMPILE_DEVICE_DEBUG}"
   cmake --build "${BUILD_DIR}" --target dispatch_ffn_combine_v2 -j16
 else
   if [[ ! -x "${BUILD_DIR}/dispatch_ffn_combine_v2" ]]; then

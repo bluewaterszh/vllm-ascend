@@ -22,6 +22,7 @@
 #include "catlass/matrix_coord.hpp"
 #include "catlass/epilogue/tile/tile_copy.hpp"
 #include "../kernel_launch.hpp"
+#include "profile_debug_config.h"
 
 #ifndef HCCL_COMM
     #include "block_mmad_preload_async_fixpipe_quant.hpp"
@@ -241,11 +242,16 @@ public:
 private:
     CATLASS_DEVICE void RecordProfile(Params const &params, uint32_t index) const
     {
+#if DISPATCH_FFN_COMBINE_V2_ENABLE_INNER_PROFILE
         if (params.profileEntryGM != nullptr && index < DISPATCH_FFN_COMBINE_PROFILE_ENTRY_U64_COUNT) {
             volatile __gm__ uint64_t *profileEntry =
                 reinterpret_cast<volatile __gm__ uint64_t *>(params.profileEntryGM);
             profileEntry[index] = get_sys_cnt();
         }
+#else
+        (void)params;
+        (void)index;
+#endif
     }
 
     CATLASS_DEVICE void RecordStageStart(Params const &params, uint32_t stage) const
