@@ -264,6 +264,40 @@ private:
         RecordProfile(params, DISPATCH_FFN_COMBINE_PROFILE_STAGE_BASE + stage * 2U + 1U);
     }
 
+    CATLASS_DEVICE void RecordReadyStageStart(Params const &params, uint32_t readyStage) const
+    {
+        RecordProfile(params, DISPATCH_FFN_COMBINE_PROFILE_READY_STAGE_BASE + readyStage);
+    }
+
+    CATLASS_DEVICE void RecordReadyStageStartOnce(Params const &params, uint32_t readyStage, bool &recorded) const
+    {
+#if DISPATCH_FFN_COMBINE_V2_ENABLE_INNER_PROFILE
+        if (!recorded) {
+            RecordReadyStageStart(params, readyStage);
+            recorded = true;
+        }
+#else
+        (void)params;
+        (void)readyStage;
+        (void)recorded;
+#endif
+    }
+
+    CATLASS_DEVICE bool HasSwigluLocalRows(uint32_t rows, uint32_t epilogueCoreNum) const
+    {
+        if (rows == 0U || epilogueCoreNum == 0U || epilogueCoreNum > coreNum) {
+            return false;
+        }
+        const uint32_t moveDataCoreNum = coreNum - epilogueCoreNum;
+        if (coreIdx < moveDataCoreNum) {
+            return false;
+        }
+        const uint32_t epilogueCoreIdx = coreIdx - moveDataCoreNum;
+        const uint32_t perCoreData = rows / epilogueCoreNum;
+        const uint32_t remainderData = rows % epilogueCoreNum;
+        return epilogueCoreIdx < remainderData ? true : perCoreData != 0U;
+    }
+
     CATLASS_DEVICE void initBuffer(Params const &params) {
         #ifndef HCCL_COMM
             shmem.initShmem(params.symmetricPtr, params.rank, params.rankSize);
@@ -486,6 +520,7 @@ private:
         int32_t syncLoopIdx = -1;
 
         uint16_t syncgmmIdx = 0;
+        bool readyStageRecorded = false;
         AscendC::CrossCoreWaitFlag<0x2>(syncgmmIdx / CROSS_CORE_FLAG_MAX_SET_COUNT); // Wait for AIV to finish cumsum for matmul
         syncgmmIdx++;
 
@@ -533,6 +568,8 @@ private:
                 int64_t gmOffsetC = layoutC.GetOffset(offsetC);
                 int64_t gmOffsetS = blockCoord.n() * L1TileShape::N + (params.listLen == 1 ? groupIdx * params.problemShape.n() : 0);
                 if (currentM > 0) {
+                    RecordReadyStageStartOnce(params, DISPATCH_FFN_COMBINE_PROFILE_READY_STAGE_GMM1,
+                                              readyStageRecorded);
                     blockMmad(
                         gmA[gmGroupOffsetA + gmOffsetA], layoutA,
                         gmB1[gmGroupOffsetB + gmOffsetB], layoutB1,
@@ -595,6 +632,7 @@ private:
         if (params.epilogueGranularity < params.expertPerRank) {
             lastDequantExpertNum = params.expertPerRank - params.epilogueGranularity;
         }
+        bool readyStageRecorded = false;
 
         for (uint32_t groupIdx = 0; groupIdx < params.expertPerRank; ++groupIdx) {
             uint32_t currentM = cumsumMM((params.EP - 1) * params.expertPerRank + groupIdx);
@@ -647,6 +685,8 @@ private:
                 int64_t gmOffsetC = layoutC.GetOffset(offsetC);
                 int64_t gmOffsetS = blockCoord.n() * L1TileShape::N + (params.listLen == 1 ? groupIdx * n2 : 0);   // One scale group per expert
                 if (currentM > 0) {
+                    RecordReadyStageStartOnce(params, DISPATCH_FFN_COMBINE_PROFILE_READY_STAGE_GMM2,
+                                              readyStageRecorded);
                     blockMmad(
                             gmPermutedToken[gmGroupOffsetA + gmOffsetA], layoutA,
                             gmB2[gmGroupOffsetB + gmOffsetB], layoutB2,
@@ -960,6 +1000,7 @@ private:
         BlockEpilogue1 blockEpilogue1(resource, n);
 
         // Synchronous wait: SwiGLU waits for GMM1 [1]
+        bool swigluReadyStageRecorded = false;
         RecordStageStart(params, DISPATCH_FFN_COMBINE_PROFILE_STAGE_SWIGLU);
         AscendC::CrossCoreWaitFlag<0x2>(SYNCFLAGC2V);
         AscendC::SyncAll<true>();
@@ -970,6 +1011,10 @@ private:
             LayoutC layoutC{dequantSum1, params.problemShape.n()};
             int64_t gmOffsetC = layoutC.GetOffset(offsetC);
             int64_t gmOffsetD = params.layoutD1.GetOffset(offsetC);
+            if (HasSwigluLocalRows(dequantSum1, params.epilogueCoreNum)) {
+                RecordReadyStageStartOnce(params, DISPATCH_FFN_COMBINE_PROFILE_READY_STAGE_SWIGLU,
+                                          swigluReadyStageRecorded);
+            }
             blockEpilogue1(gmC[gmOffsetC], shapeC, gmPerTokenScale1[rowStartThisCore], gmPermutedToken[gmOffsetD], gmPerTokenScale2[rowStartThisCore], params.epilogueCoreNum);
         }
         AscendC::SyncAll<true>();
@@ -988,6 +1033,10 @@ private:
                 LayoutC layoutC{dequantLen, params.problemShape.n()};
                 int64_t gmOffsetC = layoutC.GetOffset(offsetC);
                 int64_t gmOffsetD = params.layoutD1.GetOffset(offsetC);
+                if (HasSwigluLocalRows(dequantLen, coreNum)) {
+                    RecordReadyStageStartOnce(params, DISPATCH_FFN_COMBINE_PROFILE_READY_STAGE_SWIGLU,
+                                              swigluReadyStageRecorded);
+                }
                 blockEpilogue1(gmC[gmOffsetC], shapeC, gmPerTokenScale1[rowStartThisCore], gmPermutedToken[gmOffsetD], gmPerTokenScale2[rowStartThisCore], coreNum);
             }
             AscendC::SyncAll<true>();
@@ -1024,6 +1073,7 @@ private:
     void CombineV1(Params const &params, BlockEpilogue2 & blockEpilogue) {
         uint32_t n2 = params.problemShape.k();
         int32_t prevGroupSum2 = 0;
+        bool readyStageRecorded = false;
 
         icache_preload(8);
         for (uint32_t t_groupIdx = 0; t_groupIdx < params.expertPerRank; ++t_groupIdx) {
@@ -1053,8 +1103,16 @@ private:
                     int64_t gmOffsetC = params.layoutD2.GetOffset(offsetC);
                     int64_t gmOffsetPeer = params.layoutD2.GetOffset(offsetPeer);
                     if constexpr (std::is_same_v<ElementA, int8_t>) {
+                        if (dataRows > 0) {
+                            RecordReadyStageStartOnce(params, DISPATCH_FFN_COMBINE_PROFILE_READY_STAGE_COMBINE,
+                                                      readyStageRecorded);
+                        }
                         blockEpilogue(gmC2[gmOffsetC], shapeC, gmPerTokenScale2[srcRowOffset], gmRemotePeer[gmOffsetPeer]);
                     } else {
+                        if (dataRows > 0) {
+                            RecordReadyStageStartOnce(params, DISPATCH_FFN_COMBINE_PROFILE_READY_STAGE_COMBINE,
+                                                      readyStageRecorded);
+                        }
                         blockEpilogue(gmC2[gmOffsetC], shapeC, gmRemotePeer[gmOffsetPeer]);
                     }
                 }
@@ -1075,6 +1133,7 @@ private:
         uint32_t preSrcExpertSum = 0;
         uint32_t n2 = params.problemShape.k();
         uint32_t k2 = params.problemShape.n() / 2;
+        bool readyStageRecorded = false;
         icache_preload(8);
         for (uint32_t groupIdx = 0; groupIdx < params.expertPerRank; ++groupIdx) {
             uint32_t currentExpertM = cumsumMM((params.EP - 1) * params.expertPerRank + groupIdx);
@@ -1116,6 +1175,10 @@ private:
                         actualm = actualBlockShape.m() - (m_rows / 2) * m0 - cur_row * m0;
                     }
                     GemmCoord realTileShape{actualm, actualBlockShape.n(), 1};
+                    if (actualm > 0 && actualBlockShape.n() > 0) {
+                        RecordReadyStageStartOnce(params, DISPATCH_FFN_COMBINE_PROFILE_READY_STAGE_COMBINE,
+                                                  readyStageRecorded);
+                    }
                     blockEpilogue(gmC2, gmPerTokenScale2, realTileCoord, realTileShape, groupIdx, preSrcExpertSum, preSumBeforeRank);
                     m_offset += m0;
                 }

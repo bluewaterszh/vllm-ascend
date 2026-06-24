@@ -283,6 +283,38 @@ const char *StageProfileName(uint32_t stage)
     return stage < DISPATCH_FFN_COMBINE_PROFILE_STAGE_COUNT ? kNames[stage] : "unknown";
 }
 
+uint32_t ReadyStageProfileStage(uint32_t ready_stage)
+{
+    switch (ready_stage) {
+        case DISPATCH_FFN_COMBINE_PROFILE_READY_STAGE_GMM1:
+            return DISPATCH_FFN_COMBINE_PROFILE_STAGE_GMM1;
+        case DISPATCH_FFN_COMBINE_PROFILE_READY_STAGE_SWIGLU:
+            return DISPATCH_FFN_COMBINE_PROFILE_STAGE_SWIGLU;
+        case DISPATCH_FFN_COMBINE_PROFILE_READY_STAGE_GMM2:
+            return DISPATCH_FFN_COMBINE_PROFILE_STAGE_GMM2;
+        case DISPATCH_FFN_COMBINE_PROFILE_READY_STAGE_COMBINE:
+            return DISPATCH_FFN_COMBINE_PROFILE_STAGE_COMBINE;
+        default:
+            return DISPATCH_FFN_COMBINE_PROFILE_STAGE_COUNT;
+    }
+}
+
+uint32_t ReadyStageForProfileStage(uint32_t stage)
+{
+    switch (stage) {
+        case DISPATCH_FFN_COMBINE_PROFILE_STAGE_GMM1:
+            return DISPATCH_FFN_COMBINE_PROFILE_READY_STAGE_GMM1;
+        case DISPATCH_FFN_COMBINE_PROFILE_STAGE_SWIGLU:
+            return DISPATCH_FFN_COMBINE_PROFILE_READY_STAGE_SWIGLU;
+        case DISPATCH_FFN_COMBINE_PROFILE_STAGE_GMM2:
+            return DISPATCH_FFN_COMBINE_PROFILE_READY_STAGE_GMM2;
+        case DISPATCH_FFN_COMBINE_PROFILE_STAGE_COMBINE:
+            return DISPATCH_FFN_COMBINE_PROFILE_READY_STAGE_COMBINE;
+        default:
+            return DISPATCH_FFN_COMBINE_PROFILE_READY_STAGE_COUNT;
+    }
+}
+
 bool StageProfileEntryParticipates(uint32_t stage, uint32_t profile_idx)
 {
     const bool is_aic = profile_idx == 0U;
@@ -326,6 +358,17 @@ void UpdateStageProfileEnvelope(StageProfileEnvelope &env, uint64_t start, uint6
 bool ProfileIntervalValid(const uint64_t *entry, uint32_t stage)
 {
     const uint64_t start = entry[DispatchFFNCombineProfileStageStartIndex(stage)];
+    const uint64_t end = entry[DispatchFFNCombineProfileStageEndIndex(stage)];
+    return start != 0U && end != 0U && end >= start;
+}
+
+bool ReadyStageProfileIntervalValid(const uint64_t *entry, uint32_t ready_stage)
+{
+    const uint32_t stage = ReadyStageProfileStage(ready_stage);
+    if (stage >= DISPATCH_FFN_COMBINE_PROFILE_STAGE_COUNT) {
+        return false;
+    }
+    const uint64_t start = entry[DispatchFFNCombineProfileReadyStageStartIndex(ready_stage)];
     const uint64_t end = entry[DispatchFFNCombineProfileStageEndIndex(stage)];
     return start != 0U && end != 0U && end >= start;
 }
@@ -380,6 +423,7 @@ std::string BuildStageProfileReportText(int rank_id, const std::vector<uint8_t> 
     uint64_t kernel_start_min = std::numeric_limits<uint64_t>::max();
     uint64_t kernel_end_max = 0;
     std::array<StageProfileEnvelope, DISPATCH_FFN_COMBINE_PROFILE_STAGE_COUNT> envelopes{};
+    std::array<StageProfileEnvelope, DISPATCH_FFN_COMBINE_PROFILE_READY_STAGE_COUNT> ready_envelopes{};
 
     for (uint32_t block = 0; block < block_dim; ++block) {
         for (uint32_t profile_idx = 0; profile_idx < DISPATCH_FFN_COMBINE_PROFILE_ENTRIES_PER_BLOCK; ++profile_idx) {
@@ -403,6 +447,17 @@ std::string BuildStageProfileReportText(int rank_id, const std::vector<uint8_t> 
                 const uint64_t end = entry[DispatchFFNCombineProfileStageEndIndex(stage)];
                 UpdateStageProfileEnvelope(envelopes[stage], start, end);
             }
+            for (uint32_t ready_stage = 0; ready_stage < DISPATCH_FFN_COMBINE_PROFILE_READY_STAGE_COUNT;
+                 ++ready_stage) {
+                const uint32_t stage = ReadyStageProfileStage(ready_stage);
+                if (!StageProfileEntryParticipates(stage, profile_idx) ||
+                    !ReadyStageProfileIntervalValid(entry, ready_stage)) {
+                    continue;
+                }
+                const uint64_t start = entry[DispatchFFNCombineProfileReadyStageStartIndex(ready_stage)];
+                const uint64_t end = entry[DispatchFFNCombineProfileStageEndIndex(stage)];
+                UpdateStageProfileEnvelope(ready_envelopes[ready_stage], start, end);
+            }
         }
     }
 
@@ -424,7 +479,17 @@ std::string BuildStageProfileReportText(int rank_id, const std::vector<uint8_t> 
            << " start_us=" << SysCntTicksToUs(env.start_min - kernel_start_min)
            << " end_us=" << SysCntTicksToUs(env.end_max - kernel_start_min)
            << " envelope_us=" << SysCntTicksToUs(env.end_max - env.start_min)
-           << " max_core_us=" << SysCntTicksToUs(env.max_core_ticks) << '\n';
+           << " max_core_us=" << SysCntTicksToUs(env.max_core_ticks);
+        const uint32_t ready_stage = ReadyStageForProfileStage(stage);
+        if (ready_stage < DISPATCH_FFN_COMBINE_PROFILE_READY_STAGE_COUNT) {
+            const StageProfileEnvelope &ready_env = ready_envelopes[ready_stage];
+            if (ready_env.valid) {
+                os << " ready_start_us=" << SysCntTicksToUs(ready_env.start_min - kernel_start_min)
+                   << " ready_envelope_us=" << SysCntTicksToUs(ready_env.end_max - ready_env.start_min)
+                   << " ready_max_core_us=" << SysCntTicksToUs(ready_env.max_core_ticks);
+            }
+        }
+        os << '\n';
     }
     return os.str();
 }
